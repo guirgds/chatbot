@@ -1,0 +1,18 @@
+# Arquivos de dependências
+/node_modules
+
+# Arquivos de log
+*.log
+npm-debug.log*
+
+# Arquivos de ambiente com segredos
+.env
+credentials.json
+
+# Arquivos de sistema operacional
+.DS_Store
+Thumbs.db
+
+# Pastas de editores de código
+.vscode/
+.idea/

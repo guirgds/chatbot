@@ -1,5 +1,15 @@
 {
+  "name": "chatbot-barbearia",
+  "version": "1.0.0",
+  "description": "Chatbot para uma barbearia no WhatsApp",
+  "main": "src/chatbot.js",
+  "scripts": {
+    "start": "node src/chatbot.js"
+  },
   "dependencies": {
+    "chrono-node": "^2.9.0",
+    "dotenv": "^17.2.3",
+    "googleapis": "^161.0.0",
     "moment-timezone": "^0.5.45",
     "openai": "^4.78.1",
     "qrcode-terminal": "^0.12.0",
