@@ -16,3 +16,7 @@ Thumbs.db
 # Pastas de editores de código
 .vscode/
 .idea/
+
+# Arquivos de sessão e cache do whatsapp-web.js
+.wwebjs_auth/
+.wwebjs_cache/
