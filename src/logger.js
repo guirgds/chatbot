@@ -10,7 +10,8 @@ const logger = winston.createLogger({
     winston.format.splat(),
     winston.format.json()
   ),
-  defaultMeta: { service: 'chatbot-barbearia' },
+  // Alteração aqui para um nome mais genérico
+  defaultMeta: { service: 'whatsapp-bot-platform' }, // Ou 'chatbot-saas', 'rgds-tech-platform', etc.
   transports: [
     new winston.transports.File({ filename: 'error.log', level: 'error' }),
     new winston.transports.File({ filename: 'combined.log' }),
