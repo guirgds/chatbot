@@ -1,5 +1,5 @@
 const axios = require('axios'); // Para enviar mensagens
-const { getResponses } = require('./responses'); // Função refatorada
+const { getResponses, generateNumberedList } = require('./responses'); // Funções refatoradas
 const { processMessage } = require('./messageProcessor'); // Função refatorada
 const calendarApi = require('./calendar'); // Módulo refatorado do calendário
 const { parseDate } = require('chrono-node');
@@ -87,66 +87,134 @@ async function sendWhatsAppMessage(businessPhoneId, accessToken, messageData) {
 
 
 // Objeto que define o que fazer em cada estado
-// MODIFICADO: Recebe 'messagePayloadSimplified', 'state', 'clientInfo' e 'responses'
 const stateHandlers = {
-    // --- ESTADOS DE AGENDAMENTO ---
+    
+    // NOVO ESTADO: Escolha do Profissional (para fluxo Clínica)
+    async AWAITING_PROFESSIONAL_CHOICE(messagePayloadSimplified, state, clientInfo, responses) {
+        const customerId = messagePayloadSimplified.from;
+        const messageBody = messagePayloadSimplified.text.body;
+        const professionals = state.professionals || []; // Lista de profissionais disponíveis
+        
+        const choiceIndex = parseInt(messageBody.trim(), 10) - 1;
+        
+        // Validação da escolha
+        if (isNaN(choiceIndex) || choiceIndex < 0 || choiceIndex >= professionals.length) {
+            
+            // Reenvia a instrução clara e a lista de profissionais
+            const errorMessage = `❌ Opção inválida. Por favor, envie o NÚMERO do profissional desejado.` + "\n\n";
+            const professionalListString = generateNumberedList(professionals, 'professional');
+
+            await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
+                to: customerId, 
+                type: 'text', 
+                text: { body: errorMessage + responses.askForProfessional(professionalListString, state.categoryName) }
+            });
+            return state; // Mantém o estado
+        }
+        
+        const chosenProfessional = professionals[choiceIndex];
+        
+        // Transiciona para AWAITING_DAY com os dados do profissional
+        state.step = 'AWAITING_DAY';
+        state.service = chosenProfessional.name; // Nome do profissional como "serviço" agendado
+        state.duration = chosenProfessional.duration || 60;
+        state.calendarId = chosenProfessional.calendarId; // CALENDAR ID DO PROFISSIONAL
+        
+        await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
+            to: customerId, type: 'text', text: { body: responses.askForDay(state.service) }
+        });
+        return state;
+    },
+    
+    // Este estado agora só é atingido via fluxo secundário ou se você usar o 'askForService'
     async AWAITING_SERVICE_CHOICE(messagePayloadSimplified, state, clientInfo, responses) {
+        // Lógica para quando um serviço é escolhido dentro de um fluxo não-menu principal
         let chosenService = null;
         const customerId = messagePayloadSimplified.from;
         const messageBody = messagePayloadSimplified.text.body;
-        const services = clientInfo.config?.services || []; // Pega serviços da config do cliente
+        const services = clientInfo.config?.services || []; 
 
         const choiceIndex = parseInt(messageBody.trim(), 10) - 1;
 
-        if (choiceIndex >= 0 && choiceIndex < services.length) {
-            chosenService = services[choiceIndex]; // Guarda o objeto { name: "...", duration: ... }
+        if (isNaN(choiceIndex) || choiceIndex < 0 || choiceIndex >= services.length) {
+            const errorMessage = "❌ Opção inválida. Por favor, envie apenas o NÚMERO do serviço desejado." + "\n\n";
+
+            await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
+                to: customerId, 
+                type: 'text', 
+                text: { body: errorMessage + responses.askForService() } 
+            });
+            return state;
         }
+
+        chosenService = services[choiceIndex]; 
 
         if (chosenService) {
             state.step = 'AWAITING_DAY';
             state.service = chosenService.name;
-            state.duration = chosenService.duration || 60; // Guarda a duração (fallback 60 min)
+            state.duration = chosenService.duration || 60;
+            // Usa o Calendar ID do cliente, pois este é o fluxo simples
+            state.calendarId = clientInfo.google_calendar_id; 
+            
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                 to: customerId, type: 'text', text: { body: responses.askForDay(state.service) }
             });
             return state;
         } else {
-            // Reenvia a lista de serviços se a opção for inválida
-            await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                to: customerId, type: 'text', text: { body: "Opção inválida.\n" + responses.askForService() } // Usa a função de responses que já gera a lista
+             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
+                to: customerId, type: 'text', text: { body: "Opção inválida.\n" + responses.askForService() }
             });
-            return state; // Mantém o estado
+            return state;
         }
     },
 
     async AWAITING_DAY(messagePayloadSimplified, state, clientInfo, responses) {
         const customerId = messagePayloadSimplified.from;
         const messageBody = messagePayloadSimplified.text.body;
-        const timezone = clientInfo.config?.timezone || 'America/Sao_Paulo'; // Usar timezone da config
-        const workingHours = clientInfo.config?.workingHours || { start: 9, end: 19 }; // Usar horários da config
+        const timezone = clientInfo.config?.timezone || 'America/Sao_Paulo';
+        const businessHours = clientInfo.config?.business_hours || {}; 
+        
+        // Usa o Calendar ID do STATE (vindo do profissional ou do serviço) ou o ID padrão do cliente
+        const calendarIdToUse = state.calendarId || clientInfo.google_calendar_id;
 
         const day = parseDate(messageBody.trim(), new Date(), { forwardDate: true });
+        
         if (day) {
-            // Validar se as credenciais do Google existem para este cliente
-            if (!clientInfo.google_calendar_id || !clientInfo.google_credentials) {
-                logger.error(`Cliente ${clientInfo.id} não tem Google Calendar configurado.`, { clientId: clientInfo.id });
+            const dayOfWeek = day.getDay();
+            const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+            const dayKey = dayNames[dayOfWeek];
+            
+            const hoursConfig = businessHours[dayKey];
+            
+            if (!hoursConfig || !hoursConfig.open || !hoursConfig.close) {
+                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
+                    to: customerId, type: 'text', text: { body: `❌ Desculpe, estamos fechados no(a) ${dayKey}. Por favor, escolha outro dia.` }
+                 });
+                 return state;
+            }
+            
+            const [startHour] = hoursConfig.open.split(':').map(Number);
+            const [endHour] = hoursConfig.close.split(':').map(Number);
+            
+            const workingHours = { start: startHour, end: endHour };
+
+            if (!calendarIdToUse || !clientInfo.google_credentials) {
+                logger.error(`Cliente ${clientInfo.id} não tem Google Calendar ID ou credenciais.`, { clientId: clientInfo.id });
                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                     to: customerId, type: 'text', text: { body: "❌ Desculpe, a agenda para este estabelecimento não está configurada corretamente." }
                 });
-                return null; // Finaliza
+                return null;
             }
             try {
-                // Chama a API do calendário passando as credenciais e ID do cliente
                 const availableSlots = await calendarApi.listAvailableSlots(
                     day,
-                    state.duration, // Usa a duração guardada no estado
-                    clientInfo.google_calendar_id,
-                    clientInfo.google_credentials, // Objeto de credenciais já parseado
+                    state.duration,
+                    calendarIdToUse, // Usa o ID do state/profissional
+                    clientInfo.google_credentials,
                     timezone,
                     workingHours
                 );
 
-                // Usa a função de responses para gerar a mensagem (ela trata o caso de 0 slots)
                 const responseMessage = responses.showAvailableSlots(availableSlots);
 
                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
@@ -155,9 +223,8 @@ const stateHandlers = {
 
                 if (availableSlots.length > 0) {
                     state.step = 'AWAITING_SLOT';
-                    state.availableSlots = availableSlots.map(slot => slot.toISOString()); // Guardar ISO strings
+                    state.availableSlots = availableSlots.map(slot => slot.toISOString());
                 }
-                // Se não houver slots, mantém o estado AWAITING_DAY
 
             } catch (calendarError) {
                 logger.error('Erro ao buscar horários no Google Calendar', { clientId: clientInfo.id, error: calendarError.message });
@@ -168,65 +235,64 @@ const stateHandlers = {
                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                     to: customerId, type: 'text', text: { body: userErrorMessage }
                 });
-                return null; // Finaliza a conversa
+                return null; 
             }
         } else {
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                 to: customerId, type: 'text', text: { body: "Não consegui entender essa data. Tente de novo (ex: 'hoje', 'sábado', '25/12')." }
             });
-            // Mantém o estado atual
         }
         return state;
     },
 
     async AWAITING_SLOT(messagePayloadSimplified, state, clientInfo, responses) {
+        // Lógica idêntica ao original, mas usa state.calendarId
         const customerId = messagePayloadSimplified.from;
         const messageBody = messagePayloadSimplified.text.body;
-        // Recriar Date objects a partir das ISO strings guardadas no estado
         const availableSlots = state.availableSlots?.map(iso => new Date(iso)) || [];
         const choice = parseInt(messageBody.trim(), 10) - 1;
 
         if (choice >= 0 && choice < availableSlots.length) {
             const chosenSlot = availableSlots[choice];
             state.step = 'AWAITING_FINAL_CONFIRMATION';
-            state.chosenSlot = chosenSlot.toISOString(); // Guarda ISO string
+            state.chosenSlot = chosenSlot.toISOString();
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                  to: customerId, type: 'text', text: { body: responses.appointmentSummary(state.service, chosenSlot) }
             });
         } else {
-            // Reenvia a lista se a opção for inválida
              await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                  to: customerId, type: 'text', text: { body: "❌ Opção inválida.\n" + responses.showAvailableSlots(availableSlots) }
              });
-            // Mantém o estado atual
+            return state;
         }
         return state;
     },
 
     async AWAITING_FINAL_CONFIRMATION(messagePayloadSimplified, state, clientInfo, responses) {
+        // Lógica idêntica ao original, mas usa state.calendarId
         const customerId = messagePayloadSimplified.from;
         const messageBody = messagePayloadSimplified.text.body;
         const customerName = messagePayloadSimplified.profile.name || "Cliente";
-        const chosenSlot = new Date(state.chosenSlot); // Recriar Date object
+        const chosenSlot = new Date(state.chosenSlot);
         const timezone = clientInfo.config?.timezone || 'America/Sao_Paulo';
+        
+        const calendarIdToUse = state.calendarId || clientInfo.google_calendar_id;
 
         if (messageBody.trim() === '1') {
-            // Validar se as credenciais do Google existem
-            if (!clientInfo.google_calendar_id || !clientInfo.google_credentials) {
-                 logger.error(`Cliente ${clientInfo.id} não tem Google Calendar configurado ao confirmar.`, { clientId: clientInfo.id });
+            if (!calendarIdToUse || !clientInfo.google_credentials) {
+                 logger.error(`Cliente ${clientInfo.id} não tem Google Calendar ID ou credenciais ao confirmar.`, { clientId: clientInfo.id });
                  await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                      to: customerId, type: 'text', text: { body: "❌ Desculpe, a agenda para este estabelecimento não está configurada corretamente." }
                  });
-                 return null; // Finaliza
+                 return null;
             }
             try {
-                // Chama a API do calendário passando credenciais e ID
                 await calendarApi.createAppointment(
                     chosenSlot.toISOString(),
                     state.service,
                     customerName,
-                    state.duration, // Usa a duração guardada
-                    clientInfo.google_calendar_id,
+                    state.duration,
+                    calendarIdToUse, // Usa o ID do state/profissional
                     clientInfo.google_credentials,
                     timezone
                 );
@@ -234,7 +300,6 @@ const stateHandlers = {
                     to: customerId, type: 'text', text: { body: responses.appointmentConfirmed(state.service, chosenSlot) }
                 });
 
-                // Salvar visita no BD (já usando clientId)
                 try {
                     await db.saveCustomerVisit(clientInfo.id, customerId, customerName, chosenSlot.toISOString());
                 } catch (dbError) {
@@ -247,28 +312,28 @@ const stateHandlers = {
                 if (error.message === 'CONFLICT') {
                     errorMessage = "❌ Ops! Alguém acabou de agendar neste horário. Por favor, digite 'menu' para recomeçar.";
                 } else if (error.message === 'CALENDAR_NOT_FOUND' || error.message === 'GOOGLE_PERMISSION_ERROR') {
-                    errorMessage = "❌ Problema na configuração da agenda deste estabelecimento. Contacte o suporte."; // Mensagem mais específica
+                    errorMessage = "❌ Problema na configuração da agenda deste estabelecimento. Contacte o suporte.";
                 }
                  await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                      to: customerId, type: 'text', text: { body: errorMessage }
                  });
-                 // Não finaliza a conversa aqui, pode ser um erro temporário, deixa o estado como está
-                 return state; // Retorna o estado atual para que o utilizador possa tentar de novo ou cancelar
+                 return state;
             }
         } else {
              await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                  to: customerId, type: 'text', text: { body: "Ok, agendamento cancelado. Digite 'menu' para recomeçar." }
              });
         }
-        return null; // Finaliza a conversa (se confirmou ou cancelou explicitamente)
+        return null;
     },
 
      // --- ESTADOS DE CANCELAMENTO E ALTERAÇÃO ---
      async AWAITING_CANCELLATION_CONFIRMATION(messagePayloadSimplified, state, clientInfo, responses) {
         const customerId = messagePayloadSimplified.from;
         const messageBody = messagePayloadSimplified.text.body;
-        // O appointmentToCancel deveria ter sido guardado como JSON serializável no estado
         const appointmentToCancel = state.appointmentToCancel;
+
+        const calendarIdToUse = state.calendarId || clientInfo.google_calendar_id;
 
         if (!appointmentToCancel || !appointmentToCancel.id) {
              logger.warn('Estado inválido em AWAITING_CANCELLATION_CONFIRMATION', { clientId: clientInfo.id, customerId });
@@ -277,22 +342,17 @@ const stateHandlers = {
              });
              return null;
         }
-         // Validar credenciais Google
-         if (!clientInfo.google_calendar_id || !clientInfo.google_credentials) {
-              logger.error(`Cliente ${clientInfo.id} sem Google Calendar configurado para cancelamento.`, { clientId: clientInfo.id });
+         if (!calendarIdToUse || !clientInfo.google_credentials) {
+              logger.error(`Cliente ${clientInfo.id} sem Google Calendar ID ou credenciais para cancelamento.`, { clientId: clientInfo.id });
               await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                   to: customerId, type: 'text', text: { body: "❌ Desculpe, a agenda para este estabelecimento não está configurada corretamente." }
               });
-              return null; // Finaliza
+              return null;
          }
 
          if (messageBody.trim() === '1') {
              try {
-                 await calendarApi.cancelAppointment(
-                     appointmentToCancel.id,
-                     clientInfo.google_calendar_id,
-                     clientInfo.google_credentials
-                 );
+                 await calendarApi.cancelAppointment(appointmentToCancel.id, calendarIdToUse, clientInfo.google_credentials);
                  await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                      to: customerId, type: 'text', text: { body: responses.appointmentCancelled }
                  });
@@ -301,7 +361,6 @@ const stateHandlers = {
                  await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                      to: customerId, type: 'text', text: { body: "❌ Ops! Ocorreu um erro e não consegui cancelar seu agendamento. Tente novamente mais tarde." }
                  });
-                  // Não finaliza, permite tentar de novo ou cancelar
                   return state;
              }
          } else {
@@ -309,68 +368,68 @@ const stateHandlers = {
                  to: customerId, type: 'text', text: { body: "Ok, seu agendamento está mantido! 😉" }
              });
          }
-         return null; // Finaliza
+         return null;
      },
 
      async AWAITING_CHANGE_CHOICE(messagePayloadSimplified, state, clientInfo, responses) {
          const customerId = messagePayloadSimplified.from;
          const messageBody = messagePayloadSimplified.text.body;
-         // Os appointments deveriam ter sido guardados como JSON serializável no estado
          const appointments = state.appointments || [];
          const choice = parseInt(messageBody.trim(), 10) - 1;
+         
+         const calendarIdToUse = state.calendarId || clientInfo.google_calendar_id;
 
-          // Validar credenciais Google
-         if (!clientInfo.google_calendar_id || !clientInfo.google_credentials) {
-              logger.error(`Cliente ${clientInfo.id} sem Google Calendar configurado para alteração.`, { clientId: clientInfo.id });
+         if (!calendarIdToUse || !clientInfo.google_credentials) {
+              logger.error(`Cliente ${clientInfo.id} sem Google Calendar ID ou credenciais para alteração.`, { clientId: clientInfo.id });
               await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                   to: customerId, type: 'text', text: { body: "❌ Desculpe, a agenda para este estabelecimento não está configurada corretamente." }
               });
-              return null; // Finaliza
+              return null;
          }
 
          if (choice >= 0 && choice < appointments.length) {
              const appointmentToChange = appointments[choice];
-             // Extrair serviço e talvez duração (se guardado) do summary
              const serviceName = appointmentToChange.summary?.split(' - ')[0] || 'Serviço';
-             // Buscar duração do serviço a partir do nome nos configs do cliente
-             const serviceConfig = clientInfo.config?.services?.find(s => s.name === serviceName);
+             // [MODIFICADO] Lógica para achar duração deve procurar em 'categories' ou 'services'
+             let serviceConfig;
+             const categoryOrServiceList = clientInfo.config?.categories || clientInfo.config?.services;
+             if(categoryOrServiceList) {
+                 // Simplificação: tenta encontrar o serviço pelo nome
+                 serviceConfig = categoryOrServiceList.find(c => c.name === serviceName) || 
+                                 categoryOrServiceList.flatMap(c => c.professionals || c.services || []).find(p => p.name === serviceName);
+             }
              const duration = serviceConfig?.duration || 60; // Fallback para 60 min
 
              try {
-                 // Cancela o antigo primeiro
-                 await calendarApi.cancelAppointment(
-                     appointmentToChange.id,
-                     clientInfo.google_calendar_id,
-                     clientInfo.google_credentials
-                 );
+                 await calendarApi.cancelAppointment(appointmentToChange.id, calendarIdToUse, clientInfo.google_credentials);
                  await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                      to: customerId, type: 'text', text: { body: responses.appointmentChanged }
                  });
 
-                 // Prepara o novo estado para recomeçar o fluxo de agendamento
                  const newState = {
                      step: 'AWAITING_DAY',
                      service: serviceName,
-                     duration: duration
+                     duration: duration,
+                     calendarId: calendarIdToUse // Preserva o Calendar ID
                  };
                  await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                     to: customerId, type: 'text', text: { body: responses.askForDay(newState.service) }
                  });
-                 return newState; // Retorna novo estado
+                 return newState;
 
              } catch (error) {
                  logger.error('Erro ao iniciar alteração de agendamento (cancelamento falhou)', { clientId: clientInfo.id, customerId, eventId: appointmentToChange.id, error: error.message });
                  await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                      to: customerId, type: 'text', text: { body: "❌ Ops! Ocorreu um erro ao tentar alterar seu agendamento. Tente novamente mais tarde." }
                  });
-                 return null; // Finaliza
+                 return null;
              }
          } else {
               // Reenvia lista se inválido
              await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                 to: customerId, type: 'text', text: { body: "❌ Opção inválida.\n" + responses.listAppointmentsToChange(appointments.map(a => ({...a, start: { dateTime: a.start?.dateTime || a.start?.date }}))) } // Remapeia para formato esperado por listAppointmentsToChange
+                 to: customerId, type: 'text', text: { body: "❌ Opção inválida.\n" + responses.listAppointmentsToChange(appointments.map(a => ({...a, start: { dateTime: a.start?.dateTime || a.start?.date }}))) }
              });
-             return state; // Mantém estado
+             return state;
          }
      }
 };
@@ -380,162 +439,176 @@ const stateHandlers = {
  * @param {object} messagePayload - O payload completo recebido da Meta.
  */
 async function handleIncomingMessage(messagePayload) {
-    let customerId = null; // Guardar fora do try para usar no catch
+    let customerId = null;
     let clientId = null;
     let clientInfo = null;
     let responses = null;
+    let currentState = null;
 
     try {
-        // Extrair informações essenciais do payload da Meta
+        // Extração e validações (mantidas do original)
         const messageObject = messagePayload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         const contactObject = messagePayload?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0];
         const metadataObject = messagePayload?.entry?.[0]?.changes?.[0]?.value?.metadata;
 
-        // Validar se é uma mensagem de texto de um utilizador e se temos os IDs
         if (messagePayload?.object !== 'whatsapp_business_account' ||
             !messageObject || messageObject.type !== 'text' ||
             !messageObject.from || !messageObject.text?.body ||
             !metadataObject?.phone_number_id)
         {
-            // Ignora outros tipos de webhook (status de entrega, reações, etc.) ou payloads malformados
             logger.debug('Payload ignorado (não é mensagem de texto ou faltam dados essenciais)', { payload: messagePayload });
             return;
         }
 
-        customerId = messageObject.from; // Número do cliente final (ex: 555199998888)
+        customerId = messageObject.from;
         const messageBody = messageObject.text.body.trim();
-        const customerName = contactObject?.profile?.name || "Cliente"; // Nome do perfil do WhatsApp
-        const businessPhoneId = metadataObject.phone_number_id; // ID do número do negócio que recebeu a msg
+        const customerName = contactObject?.profile?.name || "Cliente";
+        const businessPhoneId = metadataObject.phone_number_id;
 
-        // 1. Buscar informações do Cliente Negócios (barbearia) a partir do ID do telefone
         clientInfo = await db.getClientByPhoneId(businessPhoneId);
-        if (!clientInfo || !clientInfo.whatsapp_token) { // Verifica também se o token existe
+        if (!clientInfo || !clientInfo.whatsapp_token) {
             logger.error(`Mensagem recebida para número de negócio não registrado ou sem token no BD: ${businessPhoneId}`);
-            // Não podemos responder sem token, apenas logamos.
             return;
         }
-        clientId = clientInfo.id; // Guarda o ID interno do cliente negócio
-
-        // 2. Carregar as respostas personalizadas (ou padrão) para este cliente
-        // Passa todo o clientInfo, pois getResponses pode usar mais dados no futuro
+        clientId = clientInfo.id;
         responses = getResponses(clientInfo);
 
         logger.info(`Mensagem recebida de ${customerName} (${customerId}) para ${clientInfo.business_name} (ID: ${clientId}): "${messageBody}"`);
 
-        // 3. Buscar o estado atual da conversa deste cliente final COM este negócio
-        let currentState = await db.getConversationState(customerId, clientId);
+        currentState = await db.getConversationState(customerId, clientId);
 
-        let nextState = null; // Para armazenar o estado retornado pelos handlers
-        let responseText = null; // Para mensagens que não dependem de estado
+        let nextState = null;
+        let responseText = null;
 
-        // --- Lógica de Roteamento da Conversa ---
         const payloadSimplified = { from: customerId, text: { body: messageBody }, profile: { name: customerName } };
-
-        // A. Se existe um estado e um handler para ele, executa o handler
+        const messageBodyUpper = messageBody.toUpperCase();
+        
+        // --- NOVO ROTEAMENTO DE INÍCIO DE CONVERSA (Fluxo Unificado) ---
+        
+        // 1. Se existe um estado ativo, delega para o handler do estado
         if (currentState?.step && stateHandlers[currentState.step]) {
             nextState = await stateHandlers[currentState.step](payloadSimplified, currentState, clientInfo, responses);
         }
-        // B. Se não há estado, verifica keywords ou menu inicial
+        // 2. Se NÃO há estado ativo, processa o menu principal e keywords
         else {
-             // B.1 Verifica keywords específicas do cliente
-             responseText = processMessage(messageBody, clientInfo.config); // Passa config para buscar keywords/respostas
+             // 2.A Verifica keywords específicas do cliente
+             responseText = processMessage(messageBody, clientInfo.config);
              if (responseText) {
                  await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                      to: customerId, type: 'text', text: { body: responseText }
                  });
-                 nextState = null; // Keywords não alteram o estado geralmente
+                 nextState = null;
 
-             // B.2 Verifica se é saudação/menu
-             } else if (messageBody.match(/(oi|olá|menu|bom dia|boa tarde|boa noite)/i)) {
-                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                     to: customerId, type: 'text', text: { body: responses.welcome(customerName) } // Usa a resposta carregada
-                 });
-                 nextState = null; // Reinicia o estado
+             // 2.B Verifica Saudação, Opção de Serviço (Numérica), ou Opção A/C
+             } else if (messageBody.match(/(oi|olá|menu|bom dia|boa tarde|boa noite)/i) ||
+                        messageBodyUpper === 'A' || 
+                        messageBodyUpper === 'C' ||
+                        (parseInt(messageBody, 10) >= 1 && parseInt(messageBody, 10) <= (clientInfo.config?.categories || clientInfo.config?.services || []).length) 
+                       ) {
 
-             // B.3 Verifica opções do menu principal
-             } else {
-                 switch (messageBody) {
-                     case '1': // Agendar
-                         nextState = { step: 'AWAITING_SERVICE_CHOICE' };
-                         await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                             to: customerId, type: 'text', text: { body: responses.askForService() } // Usa a resposta carregada
-                         });
-                         break;
-                     case '2': // Alterar
-                         try {
-                             // Verifica credenciais ANTES de chamar a API
-                             if (!clientInfo.google_calendar_id || !clientInfo.google_credentials) throw new Error('GOOGLE_CONFIG_MISSING');
+                 const servicesOrCategories = clientInfo.config?.categories || clientInfo.config?.services || [];
 
-                             const appointments = await calendarApi.listCustomerAppointments(
-                                 customerName, // Usar nome ou ID? 'q' no Google busca em vários campos.
-                                 clientInfo.google_calendar_id,
-                                 clientInfo.google_credentials
-                             );
-                             if (appointments && appointments.length > 0) {
-                                 // Guardar appointments serializáveis no estado
-                                 const serializableAppointments = appointments.map(a => ({ id: a.id, summary: a.summary, start: a.start, end: a.end }));
-                                 nextState = { step: 'AWAITING_CHANGE_CHOICE', appointments: serializableAppointments };
-                                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                                     to: customerId, type: 'text', text: { body: responses.listAppointmentsToChange(appointments) }
-                                 });
-                             } else {
-                                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                                     to: customerId, type: 'text', text: { body: responses.appointmentNotFound }
-                                 });
+                 // Processa SAUDAÇÃO (envia o NOVO menu)
+                 if (messageBody.match(/(oi|olá|menu|bom dia|boa tarde|boa noite)/i)) {
+                     await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
+                         to: customerId, type: 'text', text: { body: responses.welcome(customerName) } 
+                     });
+                     nextState = null; 
+
+                 // Processa OPÇÕES A e C (Alterar/Cancelar)
+                 } else if (messageBodyUpper === 'A' || messageBodyUpper === 'C') {
+                      switch (messageBodyUpper) { 
+                         case 'A': // Alterar agendamento
+                             try {
+                                 if (!clientInfo.google_calendar_id || !clientInfo.google_credentials) throw new Error('GOOGLE_CONFIG_MISSING');
+                                 const appointments = await calendarApi.listCustomerAppointments(customerName, clientInfo.google_calendar_id, clientInfo.google_credentials);
+                                 if (appointments && appointments.length > 0) {
+                                     const serializableAppointments = appointments.map(a => ({ id: a.id, summary: a.summary, start: a.start, end: a.end }));
+                                     nextState = { step: 'AWAITING_CHANGE_CHOICE', appointments: serializableAppointments, calendarId: clientInfo.google_calendar_id };
+                                     await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
+                                         to: customerId, type: 'text', text: { body: responses.listAppointmentsToChange(appointments) }
+                                     });
+                                 } else {
+                                     await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, { to: customerId, type: 'text', text: { body: responses.appointmentNotFound } });
+                                     nextState = null;
+                                 }
+                             } catch (error) {
+                                 logger.error('Erro ao listar agendamentos para alterar', { clientId: clientInfo.id, customerId, error: error.message });
+                                 let userErrorMsg = (error.message === 'GOOGLE_CONFIG_MISSING') ? "❌ Desculpe, a agenda para este estabelecimento não está configurada corretamente." : "❌ Erro ao buscar seus agendamentos. Tente novamente mais tarde.";
+                                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, { to: customerId, type: 'text', text: { body: userErrorMsg } });
                                  nextState = null;
                              }
-                         } catch (error) {
-                             logger.error('Erro ao listar agendamentos para alterar', { clientId: clientInfo.id, customerId, error: error.message });
-                             let userErrorMsg = "❌ Erro ao buscar seus agendamentos. Tente novamente mais tarde.";
-                             if (error.message === 'GOOGLE_CONFIG_MISSING') userErrorMsg = "❌ Desculpe, a agenda para este estabelecimento não está configurada corretamente.";
-                             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                                 to: customerId, type: 'text', text: { body: userErrorMsg }
-                             });
-                             nextState = null;
-                         }
-                         break;
-                     case '3': // Cancelar
-                         try {
-                             // Verifica credenciais ANTES de chamar a API
-                             if (!clientInfo.google_calendar_id || !clientInfo.google_credentials) throw new Error('GOOGLE_CONFIG_MISSING');
-
-                             const appointmentsToCancel = await calendarApi.listCustomerAppointments(
-                                 customerName,
-                                 clientInfo.google_calendar_id,
-                                 clientInfo.google_credentials
-                             );
-                             if (appointmentsToCancel && appointmentsToCancel.length > 0) {
-                                 const nextAppointment = appointmentsToCancel[0]; // Pega o mais próximo
-                                 // Guardar appointment serializável no estado
-                                 const serializableAppointment = { id: nextAppointment.id, summary: nextAppointment.summary, start: nextAppointment.start, end: nextAppointment.end };
-                                 nextState = { step: 'AWAITING_CANCELLATION_CONFIRMATION', appointmentToCancel: serializableAppointment };
-                                 const dateStr = new Date(nextAppointment.start?.dateTime || nextAppointment.start?.date || Date.now()).toLocaleString('pt-BR');
-                                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                                     to: customerId, type: 'text', text: { body: responses.confirmCancellation(nextAppointment.summary, dateStr) }
-                                 });
-                             } else {
-                                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                                     to: customerId, type: 'text', text: { body: responses.appointmentNotFound }
-                                 });
+                             break;
+                         case 'C': // Cancelar agendamento
+                             try {
+                                 if (!clientInfo.google_calendar_id || !clientInfo.google_credentials) throw new Error('GOOGLE_CONFIG_MISSING');
+                                 const appointmentsToCancel = await calendarApi.listCustomerAppointments(customerName, clientInfo.google_calendar_id, clientInfo.google_credentials);
+                                 if (appointmentsToCancel && appointmentsToCancel.length > 0) {
+                                     const nextAppointment = appointmentsToCancel[0];
+                                     const serializableAppointment = { id: nextAppointment.id, summary: nextAppointment.summary, start: nextAppointment.start, end: nextAppointment.end };
+                                     nextState = { step: 'AWAITING_CANCELLATION_CONFIRMATION', appointmentToCancel: serializableAppointment, calendarId: clientInfo.google_calendar_id };
+                                     const dateStr = new Date(nextAppointment.start?.dateTime || nextAppointment.start?.date || Date.now()).toLocaleString('pt-BR');
+                                     await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, { to: customerId, type: 'text', text: { body: responses.confirmCancellation(nextAppointment.summary, dateStr) } });
+                                 } else {
+                                     await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, { to: customerId, type: 'text', text: { body: responses.appointmentNotFound } });
+                                     nextState = null;
+                                 }
+                             } catch (error) {
+                                 logger.error('Erro ao buscar agendamentos para cancelar', { clientId: clientInfo.id, customerId, error: error.message });
+                                 let userErrorMsg = (error.message === 'GOOGLE_CONFIG_MISSING') ? "❌ Desculpe, a agenda para este estabelecimento não está configurada corretamente." : "❌ Erro ao buscar seus agendamentos. Tente novamente mais tarde.";
+                                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, { to: customerId, type: 'text', text: { body: userErrorMsg } });
                                  nextState = null;
                              }
-                         } catch (error) {
-                             logger.error('Erro ao buscar agendamentos para cancelar', { clientId: clientInfo.id, customerId, error: error.message });
-                              let userErrorMsg = "❌ Erro ao buscar seus agendamentos. Tente novamente mais tarde.";
-                             if (error.message === 'GOOGLE_CONFIG_MISSING') userErrorMsg = "❌ Desculpe, a agenda para este estabelecimento não está configurada corretamente.";
+                             break;
+                         default:
+                             // Deve ser um número inválido ou entrada que não faz sentido
                              await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                                 to: customerId, type: 'text', text: { body: userErrorMsg }
+                                 to: customerId, type: 'text', text: { body: responses.default }
                              });
                              nextState = null;
-                         }
-                        break;
-                     default: // Resposta Padrão (se processMessage retornou null e não é opção de menu)
+                             break;
+                     }
+
+                 // Processa ESCOLHA DO SERVIÇO/CATEGORIA (Numérico)
+                 } else if (servicesOrCategories.length > 0) {
+                     const serviceIndex = parseInt(messageBody, 10) - 1;
+                     const chosenItem = servicesOrCategories[serviceIndex];
+                     
+                     // Checagem: Se há profissionais aninhados (FLUXO CLÍNICA)
+                     if (chosenItem.professionals && chosenItem.professionals.length > 0) {
+                          // Transiciona para AWAITING_PROFESSIONAL_CHOICE
+                          nextState = { 
+                             step: 'AWAITING_PROFESSIONAL_CHOICE', 
+                             categoryName: chosenItem.name,
+                             professionals: chosenItem.professionals
+                          };
+                          // Assumimos que generateNumberedList está disponível
+                          await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
+                              to: customerId, 
+                              type: 'text', 
+                              text: { body: responses.askForProfessional(generateNumberedList(chosenItem.professionals, 'professional'), chosenItem.name) } 
+                          });
+                     } else {
+                         // FLUXO BARBEARIA (SIMPLES): Vai direto para o dia, usando o Calendar ID do cliente
+                         nextState = { 
+                            step: 'AWAITING_DAY', 
+                            service: chosenItem.name, 
+                            duration: chosenItem.duration || 60,
+                            calendarId: clientInfo.google_calendar_id // Usa o ID padrão do cliente
+                         };
                          await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                             to: customerId, type: 'text', text: { body: responses.default } // Usa a resposta padrão carregada
+                            to: customerId, type: 'text', text: { body: responses.askForDay(chosenItem.name) } 
                          });
-                         nextState = null; // Não muda o estado
-                         break;
+                     }
                  }
+
+
+             // 2.C Resposta Padrão (se não for saudação, keyword ou opção válida)
+             } else {
+                 await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
+                     to: customerId, type: 'text', text: { body: responses.default } 
+                 });
+                 nextState = null;
              }
         }
 
