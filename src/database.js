@@ -113,16 +113,23 @@ async function getClientByPhoneId(businessPhoneId) {
         const client = await db.get(query, [businessPhoneId]);
         if (!client) return null;
 
+        // **[LOG ADICIONADO]** Loga a string JSON bruta lida do BD
+        logger.debug('Raw config_json from DB:', { rawJson: client.config_json });
+
         // Parsear JSONs com segurança ao ler do BD
         try {
             client.google_credentials = client.google_credentials_json ? JSON.parse(client.google_credentials_json) : null;
-        } catch (e) { logger.error('Erro ao parsear google_credentials_json', { clientId: client.id, error: e.message }); client.google_credentials = null; }
+        } catch (e) { logger.error('Erro ao parsear google_credentials_json', { clientId: client.id, error: e.message, rawJson: client.google_credentials_json }); client.google_credentials = null; }
         try {
             client.config = client.config_json ? JSON.parse(client.config_json) : {}; // Default para objeto vazio
-        } catch (e) { logger.error('Erro ao parsear config_json', { clientId: client.id, error: e.message }); client.config = {}; }
+        } catch (e) {
+             // **[LOG MODIFICADO]** Inclui a string bruta no log de erro
+            logger.error('Erro ao parsear config_json', { clientId: client.id, error: e.message, rawJson: client.config_json }); 
+            client.config = {}; // Define como objeto vazio se o parse falhar
+        }
         try {
             client.promo_template_vars = client.promo_template_vars_json ? JSON.parse(client.promo_template_vars_json) : {};
-        } catch (e) { logger.error('Erro ao parsear promo_template_vars_json', { clientId: client.id, error: e.message }); client.promo_template_vars = {}; }
+        } catch (e) { logger.error('Erro ao parsear promo_template_vars_json', { clientId: client.id, error: e.message, rawJson: client.promo_template_vars_json }); client.promo_template_vars = {}; }
 
         return client;
     } catch (err) {
