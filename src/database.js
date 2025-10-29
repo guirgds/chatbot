@@ -33,6 +33,10 @@ async function initializeDatabase() {
                 google_calendar_id TEXT,                -- ID do Google Calendar específico deste cliente
                 google_credentials_json TEXT,           -- Conteúdo do JSON de credenciais do Google (armazenado como texto)
                 config_json TEXT,                       -- Configs (serviços, durações, respostas keyword, etc. em JSON)
+                timezone TEXT DEFAULT 'America/Sao_Paulo',
+                work_schedule TEXT DEFAULT '{}',
+                slot_interval INTEGER DEFAULT 30,
+                max_daily_slots INTEGER DEFAULT 20,
                 promo_template_name TEXT,               -- Nome do template de promoção aprovado na Meta
                 promo_template_language TEXT,           -- Idioma do template (ex: pt_BR)
                 promo_template_vars_json TEXT,          -- Variáveis da promoção em JSON (ex: {"coupon": "OFERTA10"})
@@ -98,6 +102,43 @@ async function getDb() {
     }
 }
 
+// ✅ FUNÇÃO MANTIDA (mas não usada como fallback)
+function convertBusinessHoursToWorkSchedule(businessHours) {
+    const workSchedule = {};
+    
+    const daysMap = {
+        'monday': 'monday',
+        'tuesday': 'tuesday', 
+        'wednesday': 'wednesday',
+        'thursday': 'thursday',
+        'friday': 'friday',
+        'saturday': 'saturday',
+        'sunday': 'sunday'
+    };
+
+    Object.entries(daysMap).forEach(([enDay, ptDay]) => {
+        const hours = businessHours[ptDay];
+        if (hours && hours.open && hours.close) {
+            // Converter "09:00" para 9, "18:00" para 18
+            const start = parseInt(hours.open.split(':')[0]);
+            const end = parseInt(hours.close.split(':')[0]);
+            workSchedule[enDay] = {
+                start: start,
+                end: end,
+                available: true
+            };
+        } else {
+            workSchedule[enDay] = {
+                start: 0,
+                end: 0, 
+                available: false
+            };
+        }
+    });
+
+    return workSchedule;
+}
+
 // --- Funções para Gerenciar Clientes (Negócios) ---
 
 /**
@@ -113,23 +154,72 @@ async function getClientByPhoneId(businessPhoneId) {
         const client = await db.get(query, [businessPhoneId]);
         if (!client) return null;
 
-        // **[LOG ADICIONADO]** Loga a string JSON bruta lida do BD
+        // **[LOG ADICIONADO]** Loga as strings JSON brutas lidas do BD
         logger.debug('Raw config_json from DB:', { rawJson: client.config_json });
+        logger.debug('Raw work_schedule from DB:', { rawWorkSchedule: client.work_schedule });
 
         // Parsear JSONs com segurança ao ler do BD
         try {
             client.google_credentials = client.google_credentials_json ? JSON.parse(client.google_credentials_json) : null;
-        } catch (e) { logger.error('Erro ao parsear google_credentials_json', { clientId: client.id, error: e.message, rawJson: client.google_credentials_json }); client.google_credentials = null; }
+        } catch (e) { 
+            logger.error('Erro ao parsear google_credentials_json', { clientId: client.id, error: e.message, rawJson: client.google_credentials_json }); 
+            client.google_credentials = null; 
+        }
+        
         try {
             client.config = client.config_json ? JSON.parse(client.config_json) : {}; // Default para objeto vazio
         } catch (e) {
-             // **[LOG MODIFICADO]** Inclui a string bruta no log de erro
             logger.error('Erro ao parsear config_json', { clientId: client.id, error: e.message, rawJson: client.config_json }); 
             client.config = {}; // Define como objeto vazio se o parse falhar
         }
+        
         try {
             client.promo_template_vars = client.promo_template_vars_json ? JSON.parse(client.promo_template_vars_json) : {};
-        } catch (e) { logger.error('Erro ao parsear promo_template_vars_json', { clientId: client.id, error: e.message, rawJson: client.promo_template_vars_json }); client.promo_template_vars = {}; }
+        } catch (e) { 
+            logger.error('Erro ao parsear promo_template_vars_json', { clientId: client.id, error: e.message, rawJson: client.promo_template_vars_json }); 
+            client.promo_template_vars = {}; 
+        }
+
+        // ✅ MODIFICADO: SEMPRE usar work_schedule, NUNCA usar business_hours como fallback
+        try {
+            client.work_schedule = client.work_schedule ? JSON.parse(client.work_schedule) : null;
+        } catch (e) {
+            logger.error('Erro ao parsear work_schedule', { clientId: client.id, error: e.message, rawJson: client.work_schedule });
+            client.work_schedule = null;
+        }
+
+        // ✅ NOVO: Se work_schedule não existir, criar um padrão SEM usar business_hours
+        if (!client.work_schedule || Object.keys(client.work_schedule).length === 0) {
+            logger.warn('Work schedule não encontrado, criando configuração padrão', { clientId: client.id });
+            client.work_schedule = {
+                "monday": {"start": 9, "end": 18, "available": true},
+                "tuesday": {"start": 9, "end": 18, "available": true},
+                "wednesday": {"start": 9, "end": 18, "available": true},
+                "thursday": {"start": 9, "end": 18, "available": true},
+                "friday": {"start": 9, "end": 18, "available": true},
+                "saturday": {"start": 9, "end": 17, "available": true},
+                "sunday": {"start": 0, "end": 0, "available": false}
+            };
+        }
+
+        // ✅ NOVO: Log para debug
+        logger.debug('Work schedule final carregado:', { 
+            workSchedule: client.work_schedule,
+            clientId: client.id 
+        });
+
+        // ✅ NOVO: Garantir que timezone tenha um valor padrão
+        if (!client.timezone) {
+            client.timezone = 'America/Sao_Paulo';
+        }
+
+        // ✅ NOVO: Garantir que slot_interval e max_daily_slots tenham valores padrão
+        if (!client.slot_interval) {
+            client.slot_interval = 30;
+        }
+        if (!client.max_daily_slots) {
+            client.max_daily_slots = 20;
+        }
 
         return client;
     } catch (err) {

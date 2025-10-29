@@ -12,7 +12,6 @@ const AXIOS_TIMEOUT = 6000;
  */
 function normalizePrivateKey(key) {
   if (!key) return key;
-  // Se contiver "\n" literais, converte para quebras reais
   return key.includes('\\n') ? key.replace(/\\n/g, '\n') : key;
 }
 
@@ -32,9 +31,7 @@ function getAuthenticatedCalendarClient(googleCredentials) {
 }
 
 /**
- * Verifica se o dia é feriado (via API pública Nager.Date)
- * @param {Date} date
- * @param {string} countryCode (default 'BR')
+ * Verifica se o dia é feriado
  */
 async function isHoliday(date, countryCode = 'BR') {
   try {
@@ -50,76 +47,95 @@ async function isHoliday(date, countryCode = 'BR') {
 }
 
 /**
- * Verifica se há evento “Aberto” no dia (permite funcionamento em feriado)
+ * 🎯 CONVERSOR AUTOMÁTICO: Aceita números (9, 18) e strings ("09:00", "18:00")
  */
-async function hasOverrideOpenEvent(date, calendarId, googleCredentials) {
-  try {
-    const calendar = getAuthenticatedCalendarClient(googleCredentials);
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
-
-    const response = await calendar.events.list({
-      calendarId,
-      timeMin: startOfDay.toISOString(),
-      timeMax: endOfDay.toISOString(),
-      q: 'Aberto', // busca por título contendo "Aberto"
-      singleEvents: true,
-      orderBy: 'startTime',
-    });
-
-    return (response.data.items || []).length > 0;
-  } catch (error) {
-    logger.warn('Erro ao verificar eventos “Aberto” no Google Calendar', { error: error.message });
-    return false;
+function normalizeWorkingHours(workingHours) {
+  if (!workingHours) return { start: 9, end: 18 }; // padrão
+  
+  let startHour, endHour;
+  
+  // Converter start
+  if (typeof workingHours.start === 'string') {
+    // Formato "09:00" -> converter para número 9
+    startHour = parseInt(workingHours.start.split(':')[0]);
+  } else if (typeof workingHours.start === 'number') {
+    // Já é número (9)
+    startHour = workingHours.start;
+  } else {
+    startHour = 9; // padrão
   }
+  
+  // Converter end
+  if (typeof workingHours.end === 'string') {
+    // Formato "18:00" -> converter para número 18
+    endHour = parseInt(workingHours.end.split(':')[0]);
+  } else if (typeof workingHours.end === 'number') {
+    // Já é número (18)
+    endHour = workingHours.end;
+  } else {
+    endHour = 18; // padrão
+  }
+  
+  console.log(`🔄 HORÁRIOS NORMALIZADOS: ${workingHours.start}-${workingHours.end} -> ${startHour}:00-${endHour}:00`);
+  
+  return { start: startHour, end: endHour };
 }
 
 /**
  * Lista os próximos dias em que o estabelecimento estará aberto
- * Considera feriados e dias de funcionamento configurados
- * @returns [{ name, date, formatted }]
  */
-async function listAvailableDays(calendarId, googleCredentials, businessHours = {}, timezone = 'America/Sao_Paulo') {
-  const daysOfWeek = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-  const availableDays = [];
-  const today = new Date();
+async function listAvailableDays(calendarId, googleCredentials, workSchedule = {}, timezone = 'America/Sao_Paulo', daysToCheck = 14) {
+  try {
+    console.log('🔍 WORK_SCHEDULE RECEBIDO:', JSON.stringify(workSchedule, null, 2));
 
-  for (let i = 0; i < 7; i++) {
-    const date = new Date(today);
-    date.setDate(today.getDate() + i);
+    const availableDays = [];
+    const startDate = new Date();
+    startDate.setHours(0, 0, 0, 0);
 
-    const dayName = daysOfWeek[date.getDay()];
-    const hours = businessHours[dayName];
+    const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-    // se não há horário configurado, o dia é fechado
-    if (!hours || !hours.open || !hours.close) continue;
+    for (let i = 0; i < daysToCheck; i++) {
+      const currentDate = new Date(startDate);
+      currentDate.setDate(startDate.getDate() + i);
+      
+      const dayOfWeek = daysOfWeek[currentDate.getDay()];
+      const dayConfig = workSchedule[dayOfWeek];
 
-    const holiday = await isHoliday(date);
-    const openOverride = await hasOverrideOpenEvent(date, calendarId, googleCredentials);
+      if (dayConfig?.available) {
+        const holiday = await isHoliday(currentDate);
+        if (holiday) {
+          console.log(`❌ FERIADO: ${currentDate.toLocaleDateString('pt-BR')}`);
+          continue;
+        }
 
-    // se for feriado e não houver evento "Aberto", pula o dia
-    if (holiday && !openOverride) continue;
+        const formattedDate = currentDate.toLocaleDateString('pt-BR', {
+          weekday: 'long',
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric'
+        });
 
-    availableDays.push({
-      name: dayName,
-      date,
-      formatted: date.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit' }),
-    });
+        availableDays.push({
+          date: currentDate.toISOString(),
+          formatted: formattedDate.charAt(0).toUpperCase() + formattedDate.slice(1)
+        });
+
+        console.log(`✅ DIA DISPONÍVEL: ${formattedDate} (${dayOfWeek})`);
+      } else {
+        console.log(`❌ DIA FECHADO: ${currentDate.toLocaleDateString('pt-BR')} (${dayOfWeek})`);
+      }
+    }
+
+    console.log(`📊 TOTAL DE DIAS DISPONÍVEIS: ${availableDays.length}`);
+    return availableDays;
+  } catch (error) {
+    logger.error('Erro em listAvailableDays', { error: error.message });
+    return [];
   }
-
-  logger.info('Dias disponíveis encontrados', {
-    total: availableDays.length,
-    days: availableDays.map((d) => d.formatted),
-  });
-
-  return availableDays;
 }
 
 /**
- * Lista horários disponíveis (com antecedência mínima, feriados e dias de funcionamento)
- * `config` pode conter: { minAdvanceMinutes: number, allowSameDay: boolean }
+ * Lista horários disponíveis - COM CONVERSÃO AUTOMÁTICA
  */
 async function listAvailableSlots(
   day,
@@ -127,77 +143,155 @@ async function listAvailableSlots(
   calendarId,
   googleCredentials,
   timezone = 'America/Sao_Paulo',
-  workingHours = { start: 9, end: 19 },
+  workingHours = { start: 9, end: 18 }, // 🎯 ACEITA NÚMEROS E STRINGS
   config = {}
 ) {
-  if (!calendarId) throw new Error('MISSING_CALENDAR_ID');
-  if (!durationInMinutes || durationInMinutes <= 0) throw new Error('INVALID_DURATION');
-
-  const calendar = getAuthenticatedCalendarClient(googleCredentials);
-  const minAdvanceMinutes = Number.isFinite(config.minAdvanceMinutes) ? config.minAdvanceMinutes : 120;
-  const allowSameDay = config.allowSameDay ?? true;
-
-  const holiday = await isHoliday(day);
-  const openOverride = await hasOverrideOpenEvent(day, calendarId, googleCredentials);
-  if (holiday && !openOverride) {
-    logger.info('Dia é feriado e sem evento “Aberto”, fechado automaticamente.');
-    return [];
-  }
-
-  const timeMin = new Date(day);
-  timeMin.setHours(workingHours.start, 0, 0, 0);
-  const timeMax = new Date(day);
-  timeMax.setHours(workingHours.end, 0, 0, 0);
-
-  const now = new Date();
-  const nowWithAdvance = new Date(now.getTime() + minAdvanceMinutes * 60000);
-  const isSameDay = day.toDateString() === now.toDateString();
-  if (isSameDay && !allowSameDay) {
-    logger.info('Cliente não permite agendamento no mesmo dia.');
-    return [];
-  }
-
   try {
-    const resp = await calendar.freebusy.query({
-      requestBody: {
-        timeMin: timeMin.toISOString(),
-        timeMax: timeMax.toISOString(),
-        timeZone: timezone,
-        items: [{ id: calendarId }],
-      },
-    });
+    if (!calendarId) throw new Error('MISSING_CALENDAR_ID');
+    if (!durationInMinutes || durationInMinutes <= 0) throw new Error('INVALID_DURATION');
 
-    const busySlots = resp.data.calendars?.[calendarId]?.busy || [];
-    const availableSlots = [];
-    const slotInterval = 15; // min
+    // 🎯 CONVERSÃO AUTOMÁTICA DOS HORÁRIOS
+    const normalizedHours = normalizeWorkingHours(workingHours);
+    const startHour = normalizedHours.start;
+    const endHour = normalizedHours.end;
 
-    let currentSlot = new Date(timeMin);
+    const calendar = getAuthenticatedCalendarClient(googleCredentials);
+    const minAdvanceMinutes = Number.isFinite(config.minAdvanceMinutes) ? config.minAdvanceMinutes : 120;
+    const allowSameDay = config.allowSameDay ?? true;
 
-    while (currentSlot.getTime() + durationInMinutes * 60000 <= timeMax.getTime()) {
-      const slotEnd = new Date(currentSlot.getTime() + durationInMinutes * 60000);
-      const isBusy = busySlots.some((b) => {
-        const busyStart = new Date(b.start);
-        const busyEnd = new Date(b.end);
-        return currentSlot < busyEnd && slotEnd > busyStart;
-      });
-
-      if (!isBusy && currentSlot >= nowWithAdvance) {
-        availableSlots.push(new Date(currentSlot));
-      }
-
-      currentSlot.setMinutes(currentSlot.getMinutes() + slotInterval);
+    // Validar horário de trabalho
+    if (startHour >= endHour) {
+      logger.warn('Horário de trabalho inválido', { start: startHour, end: endHour });
+      return [];
     }
 
-    logger.info('Horários disponíveis encontrados', {
-      date: day.toISOString().split('T')[0],
-      total: availableSlots.length,
-    });
+    // Verificar feriado
+    const holiday = await isHoliday(day);
+    if (holiday) {
+      logger.info('Dia é feriado, fechado automaticamente.');
+      return [];
+    }
 
-    return availableSlots;
+    // Criar range de tempo
+    const timeMin = new Date(day);
+    timeMin.setHours(startHour, 0, 0, 0);
+    
+    const timeMax = new Date(day);
+    timeMax.setHours(endHour, 0, 0, 0);
+
+    if (timeMin >= timeMax) {
+      logger.warn('Range de tempo inválido', { timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString() });
+      return [];
+    }
+
+    const now = new Date();
+    const nowWithAdvance = new Date(now.getTime() + minAdvanceMinutes * 60000);
+    const isSameDay = day.toDateString() === now.toDateString();
+    
+    if (isSameDay && !allowSameDay) {
+      logger.info('Cliente não permite agendamento no mesmo dia.');
+      return [];
+    }
+
+    try {
+      const resp = await calendar.freebusy.query({
+        requestBody: {
+          timeMin: timeMin.toISOString(),
+          timeMax: timeMax.toISOString(),
+          timeZone: timezone,
+          items: [{ id: calendarId }],
+        },
+      });
+
+      const busySlots = resp.data.calendars?.[calendarId]?.busy || [];
+      const availableSlots = [];
+      const slotInterval = 15;
+
+      let currentSlot = new Date(timeMin);
+
+      while (currentSlot.getTime() + durationInMinutes * 60000 <= timeMax.getTime()) {
+        const slotEnd = new Date(currentSlot.getTime() + durationInMinutes * 60000);
+        
+        const isBusy = busySlots.some((busy) => {
+          const busyStart = new Date(busy.start);
+          const busyEnd = new Date(busy.end);
+          return currentSlot < busyEnd && slotEnd > busyStart;
+        });
+
+        const isInFuture = currentSlot >= nowWithAdvance;
+
+        if (!isBusy && isInFuture) {
+          availableSlots.push(new Date(currentSlot));
+        }
+
+        currentSlot.setMinutes(currentSlot.getMinutes() + slotInterval);
+        
+        if (currentSlot.getTime() > timeMax.getTime()) {
+          break;
+        }
+      }
+
+      console.log(`✅ HORÁRIOS ENCONTRADOS: ${availableSlots.length} slots`);
+      return availableSlots;
+
+    } catch (error) {
+      if (error.message.includes('time range is empty')) {
+        logger.warn('Range de tempo vazio no Google Calendar');
+        return [];
+      }
+      throw error;
+    }
+
   } catch (error) {
-    logger.error('Erro ao listar horários disponíveis', { error: error.message });
+    logger.error('Erro ao listar horários disponíveis', { 
+      error: error.message,
+      date: day.toISOString()
+    });
     return [];
   }
+}
+
+/**
+ * Método alternativo para gerar slots manualmente - COM CONVERSÃO
+ */
+async function generateSlotsManually(
+  day,
+  durationInMinutes,
+  workingHours = { start: 9, end: 18 }, // 🎯 ACEITA NÚMEROS E STRINGS
+  config = {}
+) {
+  const minAdvanceMinutes = Number.isFinite(config.minAdvanceMinutes) ? config.minAdvanceMinutes : 120;
+  const now = new Date();
+  const nowWithAdvance = new Date(now.getTime() + minAdvanceMinutes * 60000);
+
+  // 🎯 CONVERSÃO AUTOMÁTICA
+  const normalizedHours = normalizeWorkingHours(workingHours);
+  const startHour = normalizedHours.start;
+  const endHour = normalizedHours.end;
+
+  const availableSlots = [];
+  const slotInterval = 30;
+
+  console.log(`🔄 GERANDO SLOTS MANUALMENTE: ${startHour}:00-${endHour}:00`);
+
+  for (let hour = startHour; hour < endHour; hour++) {
+    for (let minute = 0; minute < 60; minute += slotInterval) {
+      const slotTime = new Date(day);
+      slotTime.setHours(hour, minute, 0, 0);
+      
+      const slotEnd = new Date(slotTime.getTime() + durationInMinutes * 60000);
+      
+      const closingTime = new Date(day);
+      closingTime.setHours(endHour, 0, 0, 0);
+      
+      if (slotEnd <= closingTime && slotTime >= nowWithAdvance) {
+        availableSlots.push(new Date(slotTime));
+      }
+    }
+  }
+
+  console.log(`✅ SLOTS MANUAIS GERADOS: ${availableSlots.length}`);
+  return availableSlots;
 }
 
 /**
@@ -210,19 +304,30 @@ async function isSlotAvailable(
   googleCredentials,
   timezone = 'America/Sao_Paulo'
 ) {
-  const calendar = getAuthenticatedCalendarClient(googleCredentials);
-  const start = new Date(dateTimeStart);
-  const end = new Date(start.getTime() + durationInMinutes * 60000);
-  const response = await calendar.freebusy.query({
-    requestBody: { timeMin: start.toISOString(), timeMax: end.toISOString(), timeZone: timezone, items: [{ id: calendarId }] },
-  });
-  const busy = response.data.calendars?.[calendarId]?.busy || [];
-  return busy.length === 0;
+  try {
+    const calendar = getAuthenticatedCalendarClient(googleCredentials);
+    const start = new Date(dateTimeStart);
+    const end = new Date(start.getTime() + durationInMinutes * 60000);
+    
+    const response = await calendar.freebusy.query({
+      requestBody: { 
+        timeMin: start.toISOString(), 
+        timeMax: end.toISOString(), 
+        timeZone: timezone, 
+        items: [{ id: calendarId }] 
+      },
+    });
+    
+    const busy = response.data.calendars?.[calendarId]?.busy || [];
+    return busy.length === 0;
+  } catch (error) {
+    logger.error('Erro ao verificar disponibilidade do slot', { error: error.message });
+    return false;
+  }
 }
 
 /**
- * Cria o agendamento respeitando antecedência mínima, feriado e horário
- * `config` pode conter: { minAdvanceMinutes: number, allowSameDay: boolean, workingHours?: {start,end} }
+ * Cria o agendamento
  */
 async function createAppointment(
   dateTimeStart,
@@ -241,27 +346,17 @@ async function createAppointment(
 
   const minAdvanceMinutes = Number.isFinite(config.minAdvanceMinutes) ? config.minAdvanceMinutes : 120;
   const allowSameDay = config.allowSameDay ?? true;
-  const workingHours = config.workingHours || null;
 
-  // Regras de antecedência
-  if (start.getTime() - now.getTime() < minAdvanceMinutes * 60000) throw new Error('MIN_ADVANCE_NOT_MET');
-  if (!allowSameDay && start.toDateString() === now.toDateString()) throw new Error('SAME_DAY_NOT_ALLOWED');
-
-  // Feriados + exceção "Aberto"
-  const holiday = await isHoliday(start);
-  const openOverride = await hasOverrideOpenEvent(start, calendarId, googleCredentials);
-  if (holiday && !openOverride) throw new Error('HOLIDAY_CLOSED');
-
-  // (Opcional) validar contra horário de funcionamento
-  if (workingHours) {
-    const startHour = start.getHours() + start.getMinutes() / 60;
-    const endHour = end.getHours() + end.getMinutes() / 60;
-    if (startHour < workingHours.start || endHour > workingHours.end) {
-      throw new Error('OUTSIDE_WORKING_HOURS');
-    }
+  if (start.getTime() - now.getTime() < minAdvanceMinutes * 60000) {
+    throw new Error('MIN_ADVANCE_NOT_MET');
+  }
+  if (!allowSameDay && start.toDateString() === now.toDateString()) {
+    throw new Error('SAME_DAY_NOT_ALLOWED');
   }
 
-  // Disponibilidade final
+  const holiday = await isHoliday(start);
+  if (holiday) throw new Error('HOLIDAY_CLOSED');
+
   let available = false;
   try {
     available = await isSlotAvailable(start, durationInMinutes, calendarId, googleCredentials, timezone);
@@ -269,9 +364,9 @@ async function createAppointment(
     logger.error('Falha ao checar disponibilidade antes de criar evento', { error: e.message });
     throw new Error('GOOGLE_AVAILABILITY_CHECK_FAILED');
   }
+  
   if (!available) throw new Error('CONFLICT');
 
-  // Criação do evento
   const event = {
     summary: `${service} - ${customerName}`,
     description: `Agendamento via Chatbot WhatsApp.`,
@@ -295,34 +390,45 @@ async function createAppointment(
  * Lista agendamentos futuros de um cliente
  */
 async function listCustomerAppointments(customerName, calendarId, googleCredentials, timezone = 'America/Sao_Paulo') {
-  const calendar = getAuthenticatedCalendarClient(googleCredentials);
-  const resp = await calendar.events.list({
-    calendarId,
-    timeMin: new Date().toISOString(),
-    q: customerName,
-    singleEvents: true,
-    orderBy: 'startTime',
-    timeZone: timezone,
-  });
-  return resp.data.items || [];
+  try {
+    const calendar = getAuthenticatedCalendarClient(googleCredentials);
+    const resp = await calendar.events.list({
+      calendarId,
+      timeMin: new Date().toISOString(),
+      q: customerName,
+      singleEvents: true,
+      orderBy: 'startTime',
+      timeZone: timezone,
+    });
+    return resp.data.items || [];
+  } catch (error) {
+    logger.error('Erro ao listar agendamentos do cliente', { error: error.message });
+    return [];
+  }
 }
 
 /**
  * Cancela um agendamento
  */
 async function cancelAppointment(eventId, calendarId, googleCredentials) {
-  const calendar = getAuthenticatedCalendarClient(googleCredentials);
-  await calendar.events.delete({ calendarId, eventId });
-  logger.info('✅ Agendamento cancelado', { calendarId, eventId });
-  return true;
+  try {
+    const calendar = getAuthenticatedCalendarClient(googleCredentials);
+    await calendar.events.delete({ calendarId, eventId });
+    logger.info('✅ Agendamento cancelado', { calendarId, eventId });
+    return true;
+  } catch (error) {
+    logger.error('Erro ao cancelar agendamento', { error: error.message });
+    throw error;
+  }
 }
 
 module.exports = {
   createAppointment,
   listAvailableSlots,
-  listAvailableDays, // ✅ usado pelo chatbot para sugerir próximos dias abertos
+  listAvailableDays,
   isSlotAvailable,
   listCustomerAppointments,
   cancelAppointment,
   getAuthenticatedCalendarClient,
+  generateSlotsManually
 };
