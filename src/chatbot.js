@@ -133,7 +133,7 @@ stateHandlers.AWAITING_SERVICE_CHOICE = async (message, state, clientInfo, respo
     // Mensagem 2: já listar próximos dias disponíveis
     const timezone = clientInfo.timezone || 'America/Sao_Paulo';
     const workSchedule = clientInfo.work_schedule || {};
-    
+
     try {
         const availableDays = await calendarApi.listAvailableDays(state.calendarId, clientInfo.google_credentials, workSchedule, timezone);
 
@@ -170,7 +170,7 @@ stateHandlers.AWAITING_SERVICE_CHOICE = async (message, state, clientInfo, respo
     }
 };
 
-// === Escolha de dia (CORRIGIDO para usar work_schedule) ===
+// === Escolha de dia (REVERTIDO para slotInterval = duração) ===
 stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
     const customerId = message.from;
     const messageBody = message.text.body.trim().toLowerCase();
@@ -179,6 +179,10 @@ stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
     const calendarId = state.calendarId || clientInfo.google_calendar_id;
     const minAdvanceMinutes = clientInfo.config?.minAdvanceMinutes || 120;
     const googleCredentials = clientInfo.google_credentials;
+
+    // ✅ REVERTIDO: SlotInterval SEMPRE igual à duração do serviço
+    const serviceDuration = state.duration || 60;
+    const slotInterval = serviceDuration; // O "passo" é a própria duração
 
     // Verificar credenciais Google primeiro
     if (!googleCredentials || !calendarId) {
@@ -197,7 +201,7 @@ stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
         const [day, month, year] = messageBody.split('/').map(Number);
         const currentYear = new Date().getFullYear();
         parsedDate = new Date(year || currentYear, month - 1, day);
-        
+
         // Validação rigorosa da data
         if (isNaN(parsedDate.getTime()) || parsedDate.getMonth() !== month - 1) {
             parsedDate = null;
@@ -223,7 +227,7 @@ stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
     // Validação e correção da data
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    
+
     // Se data no passado, ajusta para o próximo ano
     if (parsedDate < today) {
         parsedDate.setFullYear(parsedDate.getFullYear() + 1);
@@ -240,8 +244,8 @@ stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
     const dayKey = dayKeys[weekdayIndex];
     const dayConfig = workSchedule[dayKey];
 
-    if (!dayConfig?.available) {
-        logger.debug('Dia sem expediente', { date: parsedDate.toISOString(), dayKey });
+    if (!dayConfig?.available || !dayConfig.periods || dayConfig.periods.length === 0) {
+        logger.debug('Dia sem expediente ou sem períodos definidos', { date: parsedDate.toISOString(), dayKey });
         await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
             to: customerId,
             type: 'text',
@@ -250,45 +254,44 @@ stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
         return await listAvailableDaysFallback(customerId, state, clientInfo, responses, calendarId, googleCredentials, workSchedule, timezone);
     }
 
-    // ✅ VALIDAÇÃO CRÍTICA: Verificar se horários são válidos
-    if (dayConfig.start >= dayConfig.end) {
-        logger.error('Horário de trabalho inválido na configuração', { 
-            start: dayConfig.start, 
-            end: dayConfig.end,
-            dayKey 
-        });
-        await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-            to: customerId,
-            type: 'text',
-            text: { body: `❌ Configuração de horário inválida para ${parsedDate.toLocaleDateString('pt-BR')}.` }
-        });
-        return await listAvailableDaysFallback(customerId, state, clientInfo, responses, calendarId, googleCredentials, workSchedule, timezone);
-    }
-
-    const workingHoursConfig = { start: dayConfig.start, end: dayConfig.end };
-    const duration = state.duration || 60;
+    // Log detalhado
+    logger.debug('✅ CONFIGURAÇÃO REVERTIDA:', {
+        service: state.service,
+        duration: serviceDuration,
+        slotInterval: slotInterval // Agora será igual à duration
+    });
 
     // Lista horários disponíveis com tratamento de erro e fallback
     let slots = [];
     try {
         slots = await calendarApi.listAvailableSlots(
             parsedDate,
-            duration,
+            serviceDuration,
             calendarId,
             googleCredentials,
             timezone,
-            workingHoursConfig,
-            { minAdvanceMinutes, allowSameDay: true }
+            dayConfig, // Passar o objeto dayConfig inteiro
+            {
+                minAdvanceMinutes,
+                allowSameDay: true,
+                slotInterval: slotInterval // ✅ REVERTIDO: SlotInterval = duração
+            }
         );
 
         // Se a API retornar vazio mas deveria ter slots, tenta método manual
-        if (!slots.length && workingHoursConfig.start < workingHoursConfig.end) {
-            logger.info('Tentando gerar slots manualmente como fallback...');
+        // Importante: verificar se há períodos válidos antes de chamar o fallback
+        const hasValidPeriods = dayConfig.periods.some(p => parseInt(String(p.start).split(':')[0]) < parseInt(String(p.end).split(':')[0]));
+        if (!slots.length && hasValidPeriods) {
+             logger.info('Tentando gerar slots manualmente como fallback...');
             slots = await calendarApi.generateSlotsManually(
                 parsedDate,
-                duration,
-                workingHoursConfig,
-                { minAdvanceMinutes, allowSameDay: true }
+                serviceDuration,
+                dayConfig, // Passar o objeto dayConfig inteiro
+                {
+                    minAdvanceMinutes,
+                    allowSameDay: true,
+                    slotInterval: slotInterval // ✅ REVERTIDO: SlotInterval = duração
+                }
             );
         }
     } catch (error) {
@@ -297,9 +300,13 @@ stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
         try {
             slots = await calendarApi.generateSlotsManually(
                 parsedDate,
-                duration,
-                workingHoursConfig,
-                { minAdvanceMinutes, allowSameDay: true }
+                serviceDuration,
+                dayConfig, // Passar o objeto dayConfig inteiro
+                {
+                    minAdvanceMinutes,
+                    allowSameDay: true,
+                    slotInterval: slotInterval // ✅ REVERTIDO: SlotInterval = duração
+                }
             );
         } catch (fallbackError) {
             logger.error('Erro também no fallback manual', { error: fallbackError.message });
@@ -309,6 +316,18 @@ stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
             });
             return await listAvailableDaysFallback(customerId, state, clientInfo, responses, calendarId, googleCredentials, workSchedule, timezone);
         }
+    }
+
+     // Log dos slots gerados
+    if (slots.length > 0) {
+        logger.debug('✅ SLOTS GERADOS (Intervalo = Duração):', {
+            service: state.service,
+            duration: serviceDuration,
+            slotInterval: slotInterval,
+            totalSlots: slots.length,
+            primeiroHorario: new Date(slots[0]).toLocaleTimeString('pt-BR'),
+            ultimoHorario: new Date(slots[slots.length - 1]).toLocaleTimeString('pt-BR')
+        });
     }
 
     // Quando não há horários, oferece dias alternativos
@@ -327,8 +346,8 @@ stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
     await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
         to: customerId,
         type: 'text',
-        text: { 
-            body: `✅ Horários disponíveis em ${parsedDate.toLocaleDateString('pt-BR')}:\n\n${slotList}\n\n` +
+        text: {
+            body: `✅ Horários disponíveis para *${state.service}* (${serviceDuration}min) em ${parsedDate.toLocaleDateString('pt-BR')}:\n\n${slotList}\n\n` +
                   `Envie o número do horário desejado.`
         }
     });
@@ -339,7 +358,7 @@ stateHandlers.AWAITING_DAY = async (message, state, clientInfo, responses) => {
     return state;
 };
 
-// === Seleção do dia sugerido (CORRIGIDO) ===
+// === Seleção do dia sugerido (REVERTIDO para slotInterval = duração) ===
 stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, responses) => {
     const customerId = message.from;
     const msg = message.text.body.trim();
@@ -351,7 +370,7 @@ stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, respon
         const [day, month] = msg.split('/').map(Number);
         const year = new Date().getFullYear();
         const date = new Date(year, month - 1, day);
-        
+
         if (isNaN(date.getTime())) {
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                 to: customerId, type: 'text',
@@ -359,10 +378,11 @@ stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, respon
             });
             return state;
         }
-        
+
         state.chosenDay = date.toISOString();
-        state.step = 'AWAITING_DAY';
-        return await stateHandlers.AWAITING_DAY(message, state, clientInfo, responses);
+        // Recicla a lógica do AWAITING_DAY para tratar a data
+        const simulatedMessage = { from: customerId, text: { body: msg }, profile: message.profile };
+        return await stateHandlers.AWAITING_DAY(simulatedMessage, state, clientInfo, responses);
     }
 
     // Se for escolha por número
@@ -388,8 +408,8 @@ stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, respon
     const weekdayIndex = parsedDate.getDay();
     const dayKeys = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
     const dayConfig = workSchedule[dayKeys[weekdayIndex]];
-    
-    if (!dayConfig?.available) {
+
+    if (!dayConfig?.available || !dayConfig.periods || dayConfig.periods.length === 0) {
         await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
             to: customerId, type: 'text',
             text: { body: `❌ ${selectedDay.formatted} é um dia sem expediente. Escolha outro dia.` }
@@ -397,21 +417,8 @@ stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, respon
         return state;
     }
 
-    // ✅ VALIDAÇÃO CRÍTICA: Verificar se horários são válidos
-    if (dayConfig.start >= dayConfig.end) {
-        logger.error('Horário de trabalho inválido', { 
-            start: dayConfig.start, 
-            end: dayConfig.end,
-            dayKey: dayKeys[weekdayIndex]
-        });
-        await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-            to: customerId, type: 'text',
-            text: { body: `❌ Configuração de horário inválida para ${selectedDay.formatted}.` }
-        });
-        return state;
-    }
-
-    const workingHours = { start: dayConfig.start, end: dayConfig.end };
+    // ✅ REVERTIDO: SlotInterval SEMPRE igual à duração do serviço
+    const slotInterval = duration;
 
     // Usar a mesma lógica de fallback do AWAITING_DAY
     let slots = [];
@@ -422,17 +429,27 @@ stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, respon
             state.calendarId,
             clientInfo.google_credentials,
             timezone,
-            workingHours,
-            { minAdvanceMinutes: clientInfo.config?.minAdvanceMinutes || 120, allowSameDay: true }
+            dayConfig, // Passar o objeto dayConfig inteiro
+            {
+                minAdvanceMinutes: clientInfo.config?.minAdvanceMinutes || 120,
+                allowSameDay: true,
+                slotInterval: slotInterval // ✅ REVERTIDO: SlotInterval = duração
+            }
         );
 
         // Fallback para slots manuais
-        if (!slots.length && workingHours.start < workingHours.end) {
-            slots = await calendarApi.generateSlotsManually(
+        // Importante: verificar se há períodos válidos antes de chamar o fallback
+        const hasValidPeriods = dayConfig.periods.some(p => parseInt(String(p.start).split(':')[0]) < parseInt(String(p.end).split(':')[0]));
+        if (!slots.length && hasValidPeriods) {
+             slots = await calendarApi.generateSlotsManually(
                 parsedDate,
                 duration,
-                workingHours,
-                { minAdvanceMinutes: clientInfo.config?.minAdvanceMinutes || 120, allowSameDay: true }
+                dayConfig, // Passar o objeto dayConfig inteiro
+                {
+                    minAdvanceMinutes: clientInfo.config?.minAdvanceMinutes || 120,
+                    allowSameDay: true,
+                    slotInterval: slotInterval // ✅ REVERTIDO: SlotInterval = duração
+                }
             );
         }
     } catch (error) {
@@ -442,8 +459,12 @@ stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, respon
             slots = await calendarApi.generateSlotsManually(
                 parsedDate,
                 duration,
-                workingHours,
-                { minAdvanceMinutes: clientInfo.config?.minAdvanceMinutes || 120, allowSameDay: true }
+                dayConfig, // Passar o objeto dayConfig inteiro
+                {
+                    minAdvanceMinutes: clientInfo.config?.minAdvanceMinutes || 120,
+                    allowSameDay: true,
+                    slotInterval: slotInterval // ✅ REVERTIDO: SlotInterval = duração
+                }
             );
         } catch (fallbackError) {
             logger.error('Erro também no fallback manual do day selection', { error: fallbackError.message });
@@ -458,13 +479,13 @@ stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, respon
         return state;
     }
 
-    const slotList = slots.map((s, i) => 
+    const slotList = slots.map((s, i) =>
         `${i + 1}️⃣ ${new Date(s).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
     ).join('\n');
-    
+
     await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
         to: customerId, type: 'text',
-        text: { 
+        text: {
             body: `✅ Horários disponíveis para ${selectedDay.formatted}:\n\n${slotList}\n\n` +
                   `Envie o número do horário desejado.`
         }
@@ -475,6 +496,7 @@ stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, respon
     state.chosenDay = parsedDate.toISOString();
     return state;
 };
+
 
 // === Escolha de horário ===
 stateHandlers.AWAITING_SLOT = async (message, state, clientInfo, responses) => {
@@ -492,12 +514,12 @@ stateHandlers.AWAITING_SLOT = async (message, state, clientInfo, responses) => {
     }
 
     const chosenSlot = slots[choice];
-    const dateStr = chosenSlot.toLocaleString('pt-BR', { 
-        day: '2-digit', 
-        month: '2-digit', 
+    const dateStr = chosenSlot.toLocaleString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
         year: 'numeric',
-        hour: '2-digit', 
-        minute: '2-digit' 
+        hour: '2-digit',
+        minute: '2-digit'
     });
 
     state.step = 'AWAITING_FINAL_CONFIRMATION';
@@ -506,7 +528,7 @@ stateHandlers.AWAITING_SLOT = async (message, state, clientInfo, responses) => {
     await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
         to: customerId,
         type: 'text',
-        text: { 
+        text: {
             body: `🕒 Você escolheu ${dateStr} para o serviço *${state.service}*.\n\n` +
                   `1️⃣ Confirmar agendamento\n` +
                   `2️⃣ Cancelar e voltar ao menu`
@@ -539,7 +561,7 @@ stateHandlers.AWAITING_FINAL_CONFIRMATION = async (message, state, clientInfo) =
             );
 
             await db.saveCustomerVisit(clientInfo.id, customerId, customerName, chosenSlot.toISOString());
-            
+
             const formattedDate = chosenSlot.toLocaleString('pt-BR', {
                 day: '2-digit',
                 month: '2-digit',
@@ -547,47 +569,44 @@ stateHandlers.AWAITING_FINAL_CONFIRMATION = async (message, state, clientInfo) =
                 hour: '2-digit',
                 minute: '2-digit'
             });
-            
+
             // Encontrar o serviço para mostrar o preço
             const services = clientInfo.config?.services || [];
             const serviceInfo = services.find(s => s.name === state.service);
             const price = serviceInfo?.price ? `R$ ${serviceInfo.price.toFixed(2)}` : 'Consulte o valor';
-            
-            // ✅ CORREÇÃO: Garantir que a mensagem tenha corpo
+
             const confirmationMessage = `✅ Agendamento confirmado!\n\n` +
                           `📅 ${formattedDate}\n` +
                           `💇 Serviço: ${state.service}\n` +
                           `💰 Valor: ${price}\n\n` +
                           `Obrigado pela preferência!`;
-            
+
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                to: customerId, 
+                to: customerId,
                 type: 'text',
-                text: { 
+                text: {
                     body: confirmationMessage
                 }
             });
             return null;
         } catch (error) {
             logger.error('Erro ao criar agendamento', { error: error.message });
-            
-            // ✅ CORREÇÃO: Garantir mensagem de erro também tem corpo
+
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                to: customerId, 
+                to: customerId,
                 type: 'text',
-                text: { 
-                    body: "❌ Ocorreu um erro ao confirmar o agendamento. Tente novamente." 
+                text: {
+                    body: "❌ Ocorreu um erro ao confirmar o agendamento. Tente novamente."
                 }
             });
             return state;
         }
     } else {
-        // ✅ CORREÇÃO: Garantir mensagem de cancelamento tem corpo
         await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-            to: customerId, 
+            to: customerId,
             type: 'text',
-            text: { 
-                body: "Agendamento cancelado. Digite 'menu' para recomeçar." 
+            text: {
+                body: "Agendamento cancelado. Digite 'menu' para recomeçar."
             }
         });
         return null;
@@ -635,7 +654,10 @@ stateHandlers.AWAITING_CHANGE_CHOICE = async (message, state, clientInfo, respon
     if (choice >= 0 && choice < appointments.length) {
         const appointment = appointments[choice];
         const serviceName = appointment.summary?.split(' - ')[0] || 'Serviço';
-        const duration = 60;
+        // Encontrar a duração real do serviço no config
+        const services = clientInfo.config?.services || [];
+        const serviceInfo = services.find(s => s.name === serviceName);
+        const duration = serviceInfo?.duration || 60; // Usa a duração do serviço ou 60 como fallback
 
         try {
             await calendarApi.cancelAppointment(appointment.id, calendarId, clientInfo.google_credentials);
@@ -645,10 +667,11 @@ stateHandlers.AWAITING_CHANGE_CHOICE = async (message, state, clientInfo, respon
                 text: { body: "🔁 Ok! Vamos reagendar seu atendimento. Me diga o novo dia desejado." }
             });
 
+            // Inicia o fluxo de remarcação
             return {
-                step: 'AWAITING_DAY',
+                step: 'AWAITING_DAY', // Mudar para AWAITING_DAY para que ele peça o dia
                 service: serviceName,
-                duration,
+                duration: duration, // Usa a duração correta
                 calendarId
             };
         } catch (error) {
@@ -669,6 +692,7 @@ stateHandlers.AWAITING_CHANGE_CHOICE = async (message, state, clientInfo, respon
     });
     return state;
 };
+
 
 // === Função principal do chatbot ===
 async function handleIncomingMessage(messagePayload) {
@@ -697,18 +721,11 @@ async function handleIncomingMessage(messagePayload) {
             return;
         }
 
-        // ✅ DEBUG: Log para verificar work_schedule
-        logger.debug('DEBUG WORK SCHEDULE:', { 
-            workSchedule: clientInfo.work_schedule,
-            timezone: clientInfo.timezone,
-            hasWorkSchedule: !!clientInfo.work_schedule
-        });
-
         // Verificar credenciais Google no início
         if (!clientInfo.google_credentials || !clientInfo.google_calendar_id) {
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                 to: customerId, type: 'text',
-                text: { 
+                text: {
                     body: "⚠️  Serviço de agendamento temporariamente indisponível.\n\n" +
                           "Entre em contato diretamente com o estabelecimento para agendar."
                 }
@@ -719,10 +736,10 @@ async function handleIncomingMessage(messagePayload) {
         responses = getResponses(clientInfo.config || {});
         currentState = await db.getConversationState(customerId, clientInfo.id);
 
-        const payload = { 
-            from: customerId, 
-            text: { body: messageBody }, 
-            profile: { name: customerName } 
+        const payload = {
+            from: customerId,
+            text: { body: messageBody },
+            profile: { name: customerName }
         };
         const msgUpper = messageBody.toUpperCase();
 
@@ -737,19 +754,21 @@ async function handleIncomingMessage(messagePayload) {
         else if (/^(oi|olá|menu|iniciar|começar|bom dia|boa tarde|boa noite)$/i.test(messageBody)) {
             const services = clientInfo.config?.services || [];
             const welcomeMsg = responses.welcome(customerName);
-            const serviceList = services.length ? 
-                generateNumberedList(services, 'service') : 
+            const serviceList = services.length ?
+                generateNumberedList(services, 'service') :
                 "(Nenhum serviço cadastrado)";
-                
+
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                 to: customerId, type: 'text',
-                text: { 
+                text: {
                     body: `${welcomeMsg}\n\n${responses.askForService(serviceList)}\n\n` +
                           `💡 Você também pode:\n` +
                           `📋 Digitar "A" para Alterar um agendamento\n` +
                           `❌ Digitar "C" para Cancelar um agendamento`
                 }
             });
+            // Definir estado após saudação
+            nextState = { step: 'AWAITING_SERVICE_CHOICE' };
         }
         // === Alterar agendamento ===
         else if (msgUpper === 'A') {
@@ -785,30 +804,14 @@ async function handleIncomingMessage(messagePayload) {
         }
         // === Escolha de serviço (número) ===
         else if (!isNaN(parseInt(messageBody, 10))) {
-            const index = parseInt(messageBody, 10) - 1;
-            const services = clientInfo.config?.services || [];
-            if (index < 0 || index >= services.length) {
-                await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                    to: customerId, type: 'text', text: { body: "❌ Número inválido. Digite o número do serviço desejado." }
-                });
-                return;
-            }
-            const chosenService = services[index];
-            nextState = { 
-                step: 'AWAITING_DAY', 
-                service: chosenService.name, 
-                duration: chosenService.duration || 60, 
-                calendarId: clientInfo.google_calendar_id 
-            };
-            await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                to: customerId, type: 'text', 
-                text: { body: `💇‍♂️ Ótima escolha: *${chosenService.name}*! Consultando dias disponíveis...` }
-            });
+             // Reutiliza o handler AWAITING_SERVICE_CHOICE
+            const initialState = { step: 'AWAITING_SERVICE_CHOICE' };
+            nextState = await stateHandlers.AWAITING_SERVICE_CHOICE(payload, initialState, clientInfo, responses);
         }
         // === Padrão ===
         else {
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
-                to: customerId, type: 'text', 
+                to: customerId, type: 'text',
                 text: { body: responses.default }
             });
         }
@@ -823,12 +826,12 @@ async function handleIncomingMessage(messagePayload) {
         }
 
     } catch (error) {
-        logger.error('Erro global no handleIncomingMessage', { 
+        logger.error('Erro global no handleIncomingMessage', {
             error: error.message,
             stack: error.stack,
-            customerId 
+            customerId
         });
-        
+
         if (customerId && clientInfo?.whatsapp_phone_id && clientInfo?.whatsapp_token) {
             await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
                 to: customerId, type: 'text',

@@ -47,38 +47,52 @@ async function isHoliday(date, countryCode = 'BR') {
 }
 
 /**
- * 🎯 CONVERSOR AUTOMÁTICO: Aceita números (9, 18) e strings ("09:00", "18:00")
+ * Converte string "09:00" para número 9
  */
-function normalizeWorkingHours(workingHours) {
-  if (!workingHours) return { start: 9, end: 18 }; // padrão
-  
-  let startHour, endHour;
-  
-  // Converter start
-  if (typeof workingHours.start === 'string') {
-    // Formato "09:00" -> converter para número 9
-    startHour = parseInt(workingHours.start.split(':')[0]);
-  } else if (typeof workingHours.start === 'number') {
-    // Já é número (9)
-    startHour = workingHours.start;
-  } else {
-    startHour = 9; // padrão
+function parseTimeString(timeStr) {
+  if (typeof timeStr === 'number') return timeStr;
+  if (typeof timeStr === 'string') {
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    return hours + (minutes / 60); // Retorna decimal para precisão (ex: 9.5 para 09:30)
+  }
+  return 9; // padrão
+}
+
+/**
+ * 🎯 CONVERSOR PARA MÚLTIPLOS PERÍODOS
+ */
+function normalizeWorkingPeriods(dayConfig) {
+  if (!dayConfig?.available) {
+    return [];
   }
   
-  // Converter end
-  if (typeof workingHours.end === 'string') {
-    // Formato "18:00" -> converter para número 18
-    endHour = parseInt(workingHours.end.split(':')[0]);
-  } else if (typeof workingHours.end === 'number') {
-    // Já é número (18)
-    endHour = workingHours.end;
-  } else {
-    endHour = 18; // padrão
+  // Se já tem períodos definidos, usar eles
+  if (dayConfig.periods && Array.isArray(dayConfig.periods)) {
+    const validPeriods = dayConfig.periods
+      .filter(period => period.start && period.end)
+      .map(period => ({
+        start: parseTimeString(period.start),
+        end: parseTimeString(period.end)
+      }))
+      .filter(period => period.start < period.end); // Remover períodos inválidos
+    
+    if (validPeriods.length > 0) {
+      return validPeriods;
+    }
   }
   
-  console.log(`🔄 HORÁRIOS NORMALIZADOS: ${workingHours.start}-${workingHours.end} -> ${startHour}:00-${endHour}:00`);
+  // Se não tem períodos, usar o formato antigo (backward compatibility)
+  if (dayConfig.start && dayConfig.end) {
+    const start = parseTimeString(dayConfig.start);
+    const end = parseTimeString(dayConfig.end);
+    
+    if (start < end) {
+      return [{ start, end }];
+    }
+  }
   
-  return { start: startHour, end: endHour };
+  // Padrão se nada estiver definido
+  return [{ start: 9, end: 18 }];
 }
 
 /**
@@ -101,7 +115,11 @@ async function listAvailableDays(calendarId, googleCredentials, workSchedule = {
       const dayOfWeek = daysOfWeek[currentDate.getDay()];
       const dayConfig = workSchedule[dayOfWeek];
 
-      if (dayConfig?.available) {
+      // Verificar se o dia tem períodos de trabalho válidos
+      const workingPeriods = normalizeWorkingPeriods(dayConfig);
+      const hasValidPeriods = workingPeriods.length > 0;
+
+      if (hasValidPeriods) {
         const holiday = await isHoliday(currentDate);
         if (holiday) {
           console.log(`❌ FERIADO: ${currentDate.toLocaleDateString('pt-BR')}`);
@@ -117,10 +135,11 @@ async function listAvailableDays(calendarId, googleCredentials, workSchedule = {
 
         availableDays.push({
           date: currentDate.toISOString(),
-          formatted: formattedDate.charAt(0).toUpperCase() + formattedDate.slice(1)
+          formatted: formattedDate.charAt(0).toUpperCase() + formattedDate.slice(1),
+          periods: workingPeriods.length
         });
 
-        console.log(`✅ DIA DISPONÍVEL: ${formattedDate} (${dayOfWeek})`);
+        console.log(`✅ DIA DISPONÍVEL: ${formattedDate} (${dayOfWeek}) - ${workingPeriods.length} período(s)`);
       } else {
         console.log(`❌ DIA FECHADO: ${currentDate.toLocaleDateString('pt-BR')} (${dayOfWeek})`);
       }
@@ -135,7 +154,7 @@ async function listAvailableDays(calendarId, googleCredentials, workSchedule = {
 }
 
 /**
- * Lista horários disponíveis - COM CONVERSÃO AUTOMÁTICA
+ * Lista horários disponíveis - COM SUPORTE A MÚLTIPLOS PERÍODOS
  */
 async function listAvailableSlots(
   day,
@@ -143,25 +162,24 @@ async function listAvailableSlots(
   calendarId,
   googleCredentials,
   timezone = 'America/Sao_Paulo',
-  workingHours = { start: 9, end: 18 }, // 🎯 ACEITA NÚMEROS E STRINGS
+  dayConfig = {}, // ✅ MUDANÇA: Recebe dayConfig completo
   config = {}
 ) {
   try {
     if (!calendarId) throw new Error('MISSING_CALENDAR_ID');
     if (!durationInMinutes || durationInMinutes <= 0) throw new Error('INVALID_DURATION');
 
-    // 🎯 CONVERSÃO AUTOMÁTICA DOS HORÁRIOS
-    const normalizedHours = normalizeWorkingHours(workingHours);
-    const startHour = normalizedHours.start;
-    const endHour = normalizedHours.end;
+    // ✅ CORREÇÃO: Obter múltiplos períodos do dia
+    const workingPeriods = normalizeWorkingPeriods(dayConfig);
+    const slotInterval = Number.isFinite(config.slotInterval) ? config.slotInterval : 30;
 
     const calendar = getAuthenticatedCalendarClient(googleCredentials);
     const minAdvanceMinutes = Number.isFinite(config.minAdvanceMinutes) ? config.minAdvanceMinutes : 120;
     const allowSameDay = config.allowSameDay ?? true;
 
-    // Validar horário de trabalho
-    if (startHour >= endHour) {
-      logger.warn('Horário de trabalho inválido', { start: startHour, end: endHour });
+    // Verificar se há períodos de trabalho
+    if (workingPeriods.length === 0) {
+      logger.warn('Nenhum período de trabalho definido para este dia');
       return [];
     }
 
@@ -169,18 +187,6 @@ async function listAvailableSlots(
     const holiday = await isHoliday(day);
     if (holiday) {
       logger.info('Dia é feriado, fechado automaticamente.');
-      return [];
-    }
-
-    // Criar range de tempo
-    const timeMin = new Date(day);
-    timeMin.setHours(startHour, 0, 0, 0);
-    
-    const timeMax = new Date(day);
-    timeMax.setHours(endHour, 0, 0, 0);
-
-    if (timeMin >= timeMax) {
-      logger.warn('Range de tempo inválido', { timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString() });
       return [];
     }
 
@@ -193,7 +199,19 @@ async function listAvailableSlots(
       return [];
     }
 
+    // ✅ CORREÇÃO: Log dos períodos
+    console.log(`🔄 PERÍODOS DE TRABALHO:`, workingPeriods.map(p => 
+      `${Math.floor(p.start)}:${String((p.start % 1) * 60).padStart(2, '0')} - ${Math.floor(p.end)}:${String((p.end % 1) * 60).padStart(2, '0')}`
+    ).join(' | '));
+
     try {
+      // Buscar slots ocupados para todo o dia
+      const timeMin = new Date(day);
+      timeMin.setHours(0, 0, 0, 0);
+      
+      const timeMax = new Date(day);
+      timeMax.setHours(23, 59, 59, 999);
+
       const resp = await calendar.freebusy.query({
         requestBody: {
           timeMin: timeMin.toISOString(),
@@ -205,33 +223,42 @@ async function listAvailableSlots(
 
       const busySlots = resp.data.calendars?.[calendarId]?.busy || [];
       const availableSlots = [];
-      const slotInterval = 15;
 
-      let currentSlot = new Date(timeMin);
-
-      while (currentSlot.getTime() + durationInMinutes * 60000 <= timeMax.getTime()) {
-        const slotEnd = new Date(currentSlot.getTime() + durationInMinutes * 60000);
+      // ✅ CORREÇÃO: Gerar slots para cada período de trabalho
+      for (const period of workingPeriods) {
+        let currentSlot = new Date(day);
+        currentSlot.setHours(Math.floor(period.start), Math.round((period.start % 1) * 60), 0, 0);
         
-        const isBusy = busySlots.some((busy) => {
-          const busyStart = new Date(busy.start);
-          const busyEnd = new Date(busy.end);
-          return currentSlot < busyEnd && slotEnd > busyStart;
-        });
+        const periodEnd = new Date(day);
+        periodEnd.setHours(Math.floor(period.end), Math.round((period.end % 1) * 60), 0, 0);
 
-        const isInFuture = currentSlot >= nowWithAdvance;
+        while (currentSlot.getTime() + durationInMinutes * 60000 <= periodEnd.getTime()) {
+          const slotEnd = new Date(currentSlot.getTime() + durationInMinutes * 60000);
+          
+          const isBusy = busySlots.some((busy) => {
+            const busyStart = new Date(busy.start);
+            const busyEnd = new Date(busy.end);
+            return currentSlot < busyEnd && slotEnd > busyStart;
+          });
 
-        if (!isBusy && isInFuture) {
-          availableSlots.push(new Date(currentSlot));
-        }
+          const isInFuture = currentSlot >= nowWithAdvance;
 
-        currentSlot.setMinutes(currentSlot.getMinutes() + slotInterval);
-        
-        if (currentSlot.getTime() > timeMax.getTime()) {
-          break;
+          if (!isBusy && isInFuture) {
+            availableSlots.push(new Date(currentSlot));
+          }
+
+          currentSlot.setMinutes(currentSlot.getMinutes() + slotInterval);
+          
+          if (currentSlot.getTime() > periodEnd.getTime()) {
+            break;
+          }
         }
       }
 
-      console.log(`✅ HORÁRIOS ENCONTRADOS: ${availableSlots.length} slots`);
+      // Ordenar slots por horário
+      availableSlots.sort((a, b) => a.getTime() - b.getTime());
+
+      console.log(`✅ HORÁRIOS ENCONTRADOS: ${availableSlots.length} slots em ${workingPeriods.length} períodos`);
       return availableSlots;
 
     } catch (error) {
@@ -252,45 +279,66 @@ async function listAvailableSlots(
 }
 
 /**
- * Método alternativo para gerar slots manualmente - COM CONVERSÃO
+ * Método alternativo para gerar slots manualmente - COM MÚLTIPLOS PERÍODOS
  */
 async function generateSlotsManually(
   day,
   durationInMinutes,
-  workingHours = { start: 9, end: 18 }, // 🎯 ACEITA NÚMEROS E STRINGS
+  dayConfig = {}, // ✅ MUDANÇA: Recebe dayConfig completo
   config = {}
 ) {
   const minAdvanceMinutes = Number.isFinite(config.minAdvanceMinutes) ? config.minAdvanceMinutes : 120;
   const now = new Date();
   const nowWithAdvance = new Date(now.getTime() + minAdvanceMinutes * 60000);
+  const slotInterval = Number.isFinite(config.slotInterval) ? config.slotInterval : 30;
 
-  // 🎯 CONVERSÃO AUTOMÁTICA
-  const normalizedHours = normalizeWorkingHours(workingHours);
-  const startHour = normalizedHours.start;
-  const endHour = normalizedHours.end;
-
+  // ✅ CORREÇÃO: Obter múltiplos períodos
+  const workingPeriods = normalizeWorkingPeriods(dayConfig);
   const availableSlots = [];
-  const slotInterval = 30;
 
-  console.log(`🔄 GERANDO SLOTS MANUALMENTE: ${startHour}:00-${endHour}:00`);
+  if (workingPeriods.length === 0) {
+    console.log('❌ Nenhum período de trabalho definido');
+    return [];
+  }
 
-  for (let hour = startHour; hour < endHour; hour++) {
-    for (let minute = 0; minute < 60; minute += slotInterval) {
+  console.log(`🔄 GERANDO SLOTS MANUALMENTE: ${workingPeriods.length} períodos`);
+
+  for (const period of workingPeriods) {
+    const startHour = Math.floor(period.start);
+    const startMinute = Math.round((period.start % 1) * 60);
+    const endHour = Math.floor(period.end);
+    const endMinute = Math.round((period.end % 1) * 60);
+
+    let currentHour = startHour;
+    let currentMinute = startMinute;
+
+    while (currentHour < endHour || (currentHour === endHour && currentMinute < endMinute)) {
       const slotTime = new Date(day);
-      slotTime.setHours(hour, minute, 0, 0);
+      slotTime.setHours(currentHour, currentMinute, 0, 0);
       
       const slotEnd = new Date(slotTime.getTime() + durationInMinutes * 60000);
       
-      const closingTime = new Date(day);
-      closingTime.setHours(endHour, 0, 0, 0);
+      const periodEndTime = new Date(day);
+      periodEndTime.setHours(endHour, endMinute, 0, 0);
       
-      if (slotEnd <= closingTime && slotTime >= nowWithAdvance) {
+      // Verificar se o slot cabe no período e está no futuro
+      if (slotEnd <= periodEndTime && slotTime >= nowWithAdvance) {
         availableSlots.push(new Date(slotTime));
+      }
+
+      // Avançar no intervalo
+      currentMinute += slotInterval;
+      if (currentMinute >= 60) {
+        currentHour += Math.floor(currentMinute / 60);
+        currentMinute = currentMinute % 60;
       }
     }
   }
 
-  console.log(`✅ SLOTS MANUAIS GERADOS: ${availableSlots.length}`);
+  // Ordenar slots por horário
+  availableSlots.sort((a, b) => a.getTime() - b.getTime());
+
+  console.log(`✅ SLOTS MANUAIS GERADOS: ${availableSlots.length} em ${workingPeriods.length} períodos`);
   return availableSlots;
 }
 
@@ -430,5 +478,6 @@ module.exports = {
   listCustomerAppointments,
   cancelAppointment,
   getAuthenticatedCalendarClient,
-  generateSlotsManually
+  generateSlotsManually,
+  normalizeWorkingPeriods // ✅ Exportar para testes
 };
