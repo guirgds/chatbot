@@ -135,7 +135,7 @@ stateHandlers.AWAITING_SERVICE_CHOICE = async (message, state, clientInfo, respo
     const workSchedule = clientInfo.work_schedule || {};
 
     try {
-        // ✅ MUDANÇA: Passa workSchedule completo para listAvailableDays
+        //Passa workSchedule completo para listAvailableDays
         const availableDays = await calendarApi.listAvailableDays(
             nextState.calendarId,
             clientInfo.google_credentials,
@@ -194,7 +194,7 @@ stateHandlers.AWAITING_DAY_SELECTION = async (message, state, clientInfo, respon
     let parsedDate = null;
     let selectedDayFormatted = "";
 
-    // 🔴 CORREÇÃO: Verificar primeiro se é uma data antes de interpretar como número
+    //Verificar primeiro se é uma data antes de interpretar como número
     const isDateInput = /^\d{1,2}\/\d{1,2}(\/\d{4})?$/.test(msg) || 
                        /^(amanhã|hoje|segunda|terça|quarta|quinta|sexta|sábado|domingo)/i.test(msg);
 
@@ -360,7 +360,6 @@ stateHandlers.AWAITING_SLOT = async (message, state, clientInfo, responses) => {
         hour: '2-digit', minute: '2-digit'
     });
 
-    // 🔴 CORREÇÃO: Enviar mensagem de confirmação antes de mudar de estado
     const services = clientInfo.config?.services || [];
     const serviceInfo = services.find(s => s.name === state.service);
     const price = serviceInfo?.price ? `R$ ${serviceInfo.price.toFixed(2)}` : 'Consulte o valor';
@@ -395,7 +394,6 @@ stateHandlers.AWAITING_FINAL_CONFIRMATION = async (message, state, clientInfo) =
     const customerName = message.profile?.name || 'Cliente';
     const workSchedule = clientInfo.work_schedule || {};
 
-    // 🔴 CORREÇÃO: Verificar tanto '1' quanto '2' explicitamente
     if (msg === '1') { // Confirmou
         try {
             await calendarApi.createAppointment(
@@ -464,7 +462,6 @@ stateHandlers.AWAITING_FINAL_CONFIRMATION = async (message, state, clientInfo) =
         });
         return null; // Limpa o estado
     } else {
-        // 🔴 CORREÇÃO: Se a opção for inválida, pede novamente
         await sendWhatsAppMessage(clientInfo.whatsapp_phone_id, clientInfo.whatsapp_token, {
             to: customerId, type: 'text',
             text: { 
@@ -477,7 +474,6 @@ stateHandlers.AWAITING_FINAL_CONFIRMATION = async (message, state, clientInfo) =
     }
 };
 
-// ... (o restante do código permanece igual - Confirmação de cancelamento, Escolha de agendamento para alteração, Função principal)
 
 // === Confirmação de cancelamento de agendamento ===
 stateHandlers.AWAITING_CANCELLATION_CONFIRMATION = async (message, state, clientInfo) => {

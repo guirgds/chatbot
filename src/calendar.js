@@ -63,14 +63,13 @@ async function isHoliday(date, countryCode = 'BR') {
       error: err.message,
       date: date.toISOString()
     });
-    return true; // ✅ CORREÇÃO: true em vez de false
+    return true; 
   }
 }
 
-/**
- * Converte string "HH:MM" ou número de hora para um número decimal (ex: 9.5 para 09:30)
- */
-function parseTimeString(timeStr) {
+
+ // Converte string "HH:MM" ou número de hora para um número decimal (ex: 9.5 para 09:30)
+ function parseTimeString(timeStr) {
   if (typeof timeStr === 'number') return timeStr;
   if (typeof timeStr === 'string') {
     const [hours, minutes] = timeStr.split(':').map(Number);
@@ -79,7 +78,7 @@ function parseTimeString(timeStr) {
     }
   }
   logger.warn('Formato de hora inválido encontrado, usando padrão 9:', { timeStr });
-  return 9; // padrão
+  return 9; 
 }
 
 /**
@@ -91,7 +90,6 @@ function normalizeWorkingPeriods(dayConfig) {
         return []; // Dia explicitamente fechado
     }
 
-    // Novo formato com 'periods'
     if (dayConfig.periods && Array.isArray(dayConfig.periods)) {
         const validPeriods = dayConfig.periods
         .map(period => ({
@@ -104,7 +102,7 @@ function normalizeWorkingPeriods(dayConfig) {
             return validPeriods;
         }
     }
-    // Formato antigo (compatibilidade)
+    
     else if (dayConfig.start && dayConfig.end) {
         const start = parseTimeString(dayConfig.start);
         const end = parseTimeString(dayConfig.end);
@@ -237,7 +235,7 @@ async function listAvailableDays(
         }
         console.log(`❌ DIA FECHADO: ${currentDate.toLocaleDateString('pt-BR')} (${dayOfWeek}) - ${reason}`);
       }
-    } // Fim do loop for
+    } 
 
     console.log(`📊 TOTAL DE DIAS DISPONÍVEIS: ${availableDays.length}`);
     return availableDays;
@@ -352,8 +350,8 @@ async function listAvailableSlots(
           currentSlot.setMinutes(currentSlot.getMinutes() + slotInterval);
           if (slotInterval <= 0) { logger.error("slotInterval inválido (<=0)"); break; }
           if (currentSlot.getTime() >= periodEnd.getTime()) break;
-        } // Fim while
-      } // Fim for periods
+        } 
+      } 
 
       availableSlots.sort((a, b) => a.getTime() - b.getTime());
       console.log(`✅ HORÁRIOS ENCONTRADOS: ${availableSlots.length} slots`);
@@ -367,7 +365,7 @@ async function listAvailableSlots(
         } else {
              logger.error('Erro ao buscar free/busy slots', { error: error.message, code: error.code });
         }
-       return []; // Retorna vazio em caso de erro ao buscar ocupados
+       return []; 
     }
 
   } catch (error) {

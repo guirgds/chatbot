@@ -12,7 +12,7 @@ const emoji = {
 };
 
 /**
- * 🔢 Gera listas numeradas de serviços, agendamentos ou profissionais.
+ *Gera listas numeradas de serviços, agendamentos ou profissionais.
  */
 function generateNumberedList(items, type = 'service') {
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -47,7 +47,7 @@ function generateNumberedList(items, type = 'service') {
 }
 
 /**
- * 🗨️ Gera todas as respostas dinâmicas e personalizadas com base nas configurações do cliente.
+ *Gera todas as respostas dinâmicas e personalizadas com base nas configurações do cliente.
  */
 function getResponses(clientConfig = {}) {
     const cfg = clientConfig.config || clientConfig;
@@ -77,7 +77,7 @@ function getResponses(clientConfig = {}) {
         askForDay: (service) =>
             `Ótima escolha: *${service}*! ${emoji.calendar}\nPara qual dia deseja agendar?\nExemplos: "hoje", "amanhã" ou "25/12"`,
 
-        /** ✅ Novo: mostra os próximos dias abertos */
+        /**mostra os próximos dias abertos */
         showAvailableDays: (days) => {
             if (!days || days.length === 0)
                 return `${emoji.warn} Nenhum dia disponível esta semana. Tente novamente mais tarde.`;
@@ -126,7 +126,7 @@ function getResponses(clientConfig = {}) {
 
         appointmentCancelled: `${emoji.check} Agendamento cancelado com sucesso!`,
 
-        /** 🕓 Novas respostas para regras de agenda */
+        /**Novas respostas para regras de agenda */
         holidayClosed: `${emoji.cross} O estabelecimento está fechado neste feriado. Escolha outro dia ou aguarde a próxima data disponível.`,
         minAdvanceNotMet: `${emoji.warn} O agendamento precisa ser feito com antecedência mínima. Escolha um horário mais tarde ou outro dia.`,
         sameDayNotAllowed: `${emoji.cross} Este estabelecimento não aceita agendamentos para o mesmo dia. Escolha outro dia.`,

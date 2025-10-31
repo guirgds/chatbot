@@ -8,8 +8,6 @@
 function processMessage(message, clientConfig) {
     // Verificar se as configurações necessárias existem
     if (!clientConfig || !clientConfig.keywordRules || !clientConfig.keywordResponses) {
-        // Se as regras/respostas não estiverem definidas para este cliente, não podemos processar keywords.
-        // O fluxo principal do chatbot (handleIncomingMessage) tratará a resposta padrão.
         return null;
     }
 
@@ -19,7 +17,6 @@ function processMessage(message, clientConfig) {
 
     // Procura por uma palavra-chave na mensagem do utilizador, usando as regras do cliente
     for (const key in rules) {
-        // Verificar se a regra existe e se há uma resposta correspondente
         if (rules[key] && Array.isArray(rules[key]) && responses[key]) {
             // A função .some() verifica se pelo menos uma palavra-chave da lista está na mensagem
             if (rules[key].some(keyword => lowerCaseMessage.includes(keyword.toLowerCase()))) {
@@ -28,8 +25,6 @@ function processMessage(message, clientConfig) {
         }
     }
 
-    // Se nenhuma regra corresponder, retorna null.
-    // A lógica principal do chatbot (handleIncomingMessage) decidirá se envia a resposta padrão do cliente.
     return null;
 }
 

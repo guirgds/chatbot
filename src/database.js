@@ -102,7 +102,6 @@ async function getDb() {
     }
 }
 
-// ✅ FUNÇÃO MANTIDA (mas não usada como fallback)
 function convertBusinessHoursToWorkSchedule(businessHours) {
     const workSchedule = {};
     
@@ -180,7 +179,7 @@ async function getClientByPhoneId(businessPhoneId) {
             client.promo_template_vars = {}; 
         }
 
-        // ✅ MODIFICADO: SEMPRE usar work_schedule, NUNCA usar business_hours como fallback
+        // SEMPRE usar work_schedule, NUNCA usar business_hours como fallback
         try {
             client.work_schedule = client.work_schedule ? JSON.parse(client.work_schedule) : null;
         } catch (e) {
@@ -188,7 +187,7 @@ async function getClientByPhoneId(businessPhoneId) {
             client.work_schedule = null;
         }
 
-        // ✅ NOVO: Se work_schedule não existir, criar um padrão SEM usar business_hours
+        //Se work_schedule não existir, criar um padrão SEM usar business_hours
         if (!client.work_schedule || Object.keys(client.work_schedule).length === 0) {
             logger.warn('Work schedule não encontrado, criando configuração padrão', { clientId: client.id });
             client.work_schedule = {
@@ -202,18 +201,18 @@ async function getClientByPhoneId(businessPhoneId) {
             };
         }
 
-        // ✅ NOVO: Log para debug
+        //Log para debug
         logger.debug('Work schedule final carregado:', { 
             workSchedule: client.work_schedule,
             clientId: client.id 
         });
 
-        // ✅ NOVO: Garantir que timezone tenha um valor padrão
+        // Garantir que timezone tenha um valor padrão
         if (!client.timezone) {
             client.timezone = 'America/Sao_Paulo';
         }
 
-        // ✅ NOVO: Garantir que slot_interval e max_daily_slots tenham valores padrão
+        // Garantir que slot_interval e max_daily_slots tenham valores padrão
         if (!client.slot_interval) {
             client.slot_interval = 30;
         }
@@ -240,7 +239,6 @@ async function getClientIdByPhoneId(businessPhoneId) {
 }
 
 // --- Funções para Gerenciar Clientes Finais ---
-
 /**
  * Salva ou atualiza os dados de um cliente final (associado a um negócio).
  * Usa lógica UPSERT (Update or Insert).
@@ -370,7 +368,7 @@ async function deleteConversationState(customerPhone, clientId) {
 
 // Exportar as funções que serão usadas pelos outros módulos
 module.exports = {
-    getDb, // Pode ser útil para operações de BD fora deste módulo
+    getDb, 
     getClientByPhoneId,
     getClientIdByPhoneId,
     saveCustomerVisit,
